@@ -38,7 +38,10 @@ pub(crate) fn draw_with_composer(frame: &mut Frame<'_>, app: &App, theme: Theme,
     } else {
         5
     };
-    let footer_height = 3;
+    // Reserve a real bordered composer box instead of rendering the input as a
+    // loose line below the status bar. This keeps typed text inside the panel
+    // while still leaving conversation space responsive on short terminals.
+    let footer_height = 5;
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -105,20 +108,36 @@ fn render_status(
             theme.accent
         }),
     ));
-    let lines = vec![status_line, composer_line];
+    let footer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(2)])
+        .split(area);
+
     let title = if compact {
-        " STATUS / COMPOSER "
+        " STATUS "
     } else {
         " STATUS  •  COMPOSER "
     };
     frame.render_widget(
-        Paragraph::new(Text::from(lines)).block(
+        Paragraph::new(status_line).block(
             Block::default()
                 .borders(Borders::TOP)
                 .title(title)
                 .border_style(Style::default().fg(theme.border)),
         ),
-        area,
+        footer[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new(composer_line)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" PROMPT ")
+                    .border_style(Style::default().fg(theme.border)),
+            )
+            .wrap(Wrap { trim: false }),
+        footer[1],
     );
 }
 
