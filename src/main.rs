@@ -113,7 +113,9 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                     modifiers,
                     kind: event::KeyEventKind::Press,
                     ..
-                }) if !modifiers.contains(KeyModifiers::CONTROL) && !modifiers.contains(KeyModifiers::ALT) => {
+                }) if !modifiers.contains(KeyModifiers::CONTROL)
+                    && !modifiers.contains(KeyModifiers::ALT) =>
+                {
                     composer.push(ch);
                 }
                 Event::Key(KeyEvent {

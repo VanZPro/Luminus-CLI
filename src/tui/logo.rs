@@ -1,3 +1,13 @@
+/// ASCII art LUMINUS banner for rich terminal display
+pub const ASCII_BANNER: &str = r#"
+ ██╗     ██╗   ██╗███╗   ███╗██╗███╗   ██╗██╗   ██╗███████╗
+ ██║     ██║   ██║████╗ ████║██║████╗  ██║██║   ██║██╔════╝
+ ██║     ██║   ██║██╔████╔██║██║██╔██╗ ██║██║   ██║███████╗
+ ██║     ██║   ██║██║╚██╔╝██║██║██║╚██╗██║██║   ██║╚════██║
+ ███████╗╚██████╔╝██║ ╚═╝ ██║██║██║ ╚████║╚██████╔╝███████║
+ ╚══════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚══════╝
+"#;
+
 /// Wide wordmark displayed when enough horizontal space is available.
 pub const WIDE_LOGO: &str = "LUMINUS";
 /// Compact wordmark for narrow terminal windows.
