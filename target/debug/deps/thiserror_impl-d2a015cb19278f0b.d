@@ -1,0 +1,17 @@
+E:\Luminus-CLI\target\debug\deps\thiserror_impl-d2a015cb19278f0b.d: C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\lib.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\ast.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\attr.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\expand.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\fallback.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\fmt.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\generics.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\prop.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\scan_expr.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\unraw.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\valid.rs
+
+E:\Luminus-CLI\target\debug\deps\thiserror_impl-d2a015cb19278f0b.dll: C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\lib.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\ast.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\attr.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\expand.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\fallback.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\fmt.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\generics.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\prop.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\scan_expr.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\unraw.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\valid.rs
+
+C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\lib.rs:
+C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\ast.rs:
+C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\attr.rs:
+C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\expand.rs:
+C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\fallback.rs:
+C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\fmt.rs:
+C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\generics.rs:
+C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\prop.rs:
+C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\scan_expr.rs:
+C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\unraw.rs:
+C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-2.0.19\src\valid.rs:
+
+# env-dep:CARGO_PKG_VERSION_PATCH=19
