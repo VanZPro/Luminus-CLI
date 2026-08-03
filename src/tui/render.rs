@@ -10,7 +10,7 @@ use crate::app::{App, Role};
 use crate::tool_activity::ToolStatus;
 
 use super::{
-    logo::{self, TAGLINE},
+    logo::{self, ASCII_BANNER, TAGLINE},
     theme::Theme,
 };
 
@@ -26,9 +26,18 @@ pub(crate) fn draw_with_composer(frame: &mut Frame<'_>, app: &App, theme: Theme,
     );
 
     let compact = area.width < 70;
+    let wide = area.width >= 100;
     // Keep the footer visible even on small terminals: it is the primary affordance
     // for discovering the command-line composer and current session settings.
-    let header_height = if compact { 4 } else { 6 };
+    // The header is deliberately bounded so the conversation and composer keep
+    // their space when a terminal is resized.
+    let header_height = if wide {
+        9
+    } else if compact {
+        3
+    } else {
+        5
+    };
     let footer_height = 3;
     let sections = Layout::default()
         .direction(Direction::Vertical)
@@ -39,7 +48,7 @@ pub(crate) fn draw_with_composer(frame: &mut Frame<'_>, app: &App, theme: Theme,
         ])
         .split(area);
 
-    render_header(frame, sections[0], theme, compact);
+    render_header(frame, sections[0], theme, compact, wide);
     if sections[1].height > 0 {
         render_conversation(frame, sections[1], app, theme);
     }
@@ -113,8 +122,68 @@ fn render_status(
     );
 }
 
-fn render_header(frame: &mut Frame<'_>, area: Rect, theme: Theme, compact: bool) {
+fn render_header(frame: &mut Frame<'_>, area: Rect, theme: Theme, compact: bool, wide: bool) {
     let title = logo::title(area.width);
+    if wide {
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(area);
+        let banner = ASCII_BANNER
+            .lines()
+            .map(|line| Line::from(Span::styled(line, Style::default().fg(theme.primary))))
+            .collect::<Vec<_>>();
+        frame.render_widget(
+            Paragraph::new(banner).alignment(Alignment::Center).block(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_style(Style::default().fg(theme.border)),
+            ),
+            columns[0],
+        );
+        let panel = vec![
+            Line::from(Span::styled(
+                " CAPABILITIES ",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "  chat  •  tools  •  codebase memory",
+                Style::default().fg(theme.foreground),
+            )),
+            Line::from(Span::styled(
+                "  commands: /help  /clear  /quit",
+                Style::default().fg(theme.muted),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                " SESSION ",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "  model: default  •  mode: ready",
+                Style::default().fg(theme.foreground),
+            )),
+            Line::from(Span::styled(
+                format!("  {}", TAGLINE),
+                Style::default().fg(theme.muted),
+            )),
+        ];
+        frame.render_widget(
+            Paragraph::new(panel).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" LUMINUS ")
+                    .border_style(Style::default().fg(theme.border)),
+            ),
+            columns[1],
+        );
+        return;
+    }
+
     let lines = if compact {
         vec![
             Line::from(Span::styled(
@@ -127,7 +196,6 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, theme: Theme, compact: bool)
         ]
     } else {
         vec![
-            Line::from(""),
             Line::from(Span::styled(
                 title,
                 Style::default()
@@ -135,6 +203,10 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, theme: Theme, compact: bool)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(TAGLINE, Style::default().fg(theme.accent))),
+            Line::from(Span::styled(
+                "  chat  •  tools  •  /help",
+                Style::default().fg(theme.muted),
+            )),
         ]
     };
 
