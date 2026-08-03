@@ -2,14 +2,16 @@ use std::{error::Error, fmt};
 
 use crate::model::ModelRole;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Help,
     About,
     Clear,
     Exit,
     Model(ModelRole),
-    Provider,
+    /// `/provider` lists/shows providers (`None`); `/provider <name>` switches (`Some(name)`).
+    Provider(Option<String>),
+    /// `/models` lists the configured roles and their models.
     Models,
 }
 
@@ -26,15 +28,40 @@ impl fmt::Display for ParseCommandError {
 
 impl Error for ParseCommandError {}
 
-/// Parses one of the commands supported by Milestone 1.
+/// Rich help text listing every supported slash command.
+pub fn help_text() -> String {
+    [
+        "Commands:",
+        "  /help              show this help",
+        "  /about             about LUMINUS",
+        "  /clear             clear the conversation",
+        "  /exit              quit",
+        "  /model <role>      switch the active model role",
+        "  /models            list configured roles and their models",
+        "  /provider          list/show providers",
+        "  /provider <name>   switch to the named provider",
+    ]
+    .join("\n")
+}
+
+/// Parses one of the supported slash commands.
 pub fn parse_command(input: &str) -> Result<Command, ParseCommandError> {
     match input {
         "/help" => Ok(Command::Help),
         "/about" => Ok(Command::About),
         "/clear" => Ok(Command::Clear),
         "/exit" => Ok(Command::Exit),
-        "/provider" => Ok(Command::Provider),
+        "/provider" => Ok(Command::Provider(None)),
         "/models" => Ok(Command::Models),
+        command if command.starts_with("/provider ") => {
+            let name = command.strip_prefix("/provider ").unwrap();
+            if name.is_empty() || name.contains(char::is_whitespace) {
+                return Err(ParseCommandError {
+                    command: command.to_owned(),
+                });
+            }
+            Ok(Command::Provider(Some(name.to_ascii_lowercase())))
+        }
         command if command.starts_with("/model ") => {
             let role = command.strip_prefix("/model ").unwrap();
             if role.is_empty() || role.contains(char::is_whitespace) {
@@ -56,7 +83,7 @@ pub fn parse_command(input: &str) -> Result<Command, ParseCommandError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, parse_command};
+    use super::{Command, help_text, parse_command};
 
     #[test]
     fn parses_supported_commands() {
@@ -72,5 +99,21 @@ mod tests {
         assert!(parse_command("help").is_err());
         assert!(parse_command("/HELP").is_err());
         assert!(parse_command("/help now").is_err());
+    }
+
+    #[test]
+    fn help_text_mentions_every_command() {
+        let text = help_text();
+        for command in [
+            "/help",
+            "/about",
+            "/clear",
+            "/exit",
+            "/model",
+            "/models",
+            "/provider",
+        ] {
+            assert!(text.contains(command), "help text missing {command}");
+        }
     }
 }

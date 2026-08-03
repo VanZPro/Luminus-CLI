@@ -10,7 +10,7 @@ use std::time::Duration;
 use luminus::{
     app::{App, Message, Role},
     tool_activity::ToolActivity,
-    tui::{render_to_string, render_to_string_with_composer, Theme},
+    tui::{Theme, render_to_string, render_to_string_with_composer},
 };
 
 fn app_with_activities(activities: Vec<ToolActivity>) -> App {
@@ -72,8 +72,10 @@ fn failed_and_progress_cards_render_with_details() {
 
 #[test]
 fn duration_suffix_is_rendered() {
-    let app = app_with_activities(vec![ToolActivity::completed("port_scan", "3 open ports")
-        .with_duration(Duration::from_millis(1250))]);
+    let app = app_with_activities(vec![
+        ToolActivity::completed("port_scan", "3 open ports")
+            .with_duration(Duration::from_millis(1250)),
+    ]);
     let output = render_to_string(&app, 100, 30, Theme::luminus(false));
 
     assert!(output.contains("[completed] port_scan (1250ms)"));

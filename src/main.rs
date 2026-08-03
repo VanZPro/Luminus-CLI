@@ -11,7 +11,7 @@ use crossterm::{
 };
 use luminus::{
     app::App,
-    command::{Command, parse_command},
+    command::{self, Command, parse_command},
     event::ProviderEvent,
     model::{ModelCatalog, ModelRole, ModelSelection},
     provider::{FakeProvider, Provider},
@@ -111,8 +111,9 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                 Event::Key(KeyEvent {
                     code: KeyCode::Char(ch),
                     modifiers,
+                    kind: event::KeyEventKind::Press,
                     ..
-                }) if !modifiers.contains(KeyModifiers::CONTROL) => {
+                }) if !modifiers.contains(KeyModifiers::CONTROL) && !modifiers.contains(KeyModifiers::ALT) => {
                     composer.push(ch);
                 }
                 Event::Key(KeyEvent {
@@ -144,6 +145,32 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                                     Err(error) => error.to_string(),
                                 };
                                 app.start_request("command".into(), message);
+                            }
+                            Ok(Command::Provider(name)) => {
+                                let text = if let Some(name) = name {
+                                    format!("Switching to provider: {name} (not yet implemented)")
+                                } else {
+                                    "Current provider: fake\nAvailable: fake, openai-compatible (via env)".to_owned()
+                                };
+                                app.start_request("command".into(), text);
+                            }
+                            Ok(Command::Models) => {
+                                use crate::command::help_text;
+                                let mut lines = vec!["Configured models:".to_owned()];
+                                for sel in model_catalog.list() {
+                                    let active = if model_catalog.active() == Some(sel) {
+                                        " (active)"
+                                    } else {
+                                        ""
+                                    };
+                                    lines.push(format!(
+                                        "  {} -> {} / {}{}",
+                                        sel.role, sel.provider, sel.model, active
+                                    ));
+                                }
+                                lines.push(String::new());
+                                lines.push(help_text());
+                                app.start_request("command".into(), lines.join("\n"));
                             }
                             Err(error) => app.start_request("command".into(), error.to_string()),
                         }
