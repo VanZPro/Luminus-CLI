@@ -41,12 +41,17 @@ pub(crate) fn draw_with_composer(frame: &mut Frame<'_>, app: &App, theme: Theme,
     // Reserve a real bordered composer box instead of rendering the input as a
     // loose line below the status bar. This keeps typed text inside the panel
     // while still leaving conversation space responsive on short terminals.
-    let footer_height = 5;
+    //
+    // Cap the header against the actual viewport: ratatui cannot give the
+    // conversation a negative height when a terminal is shorter than the
+    // normal header plus footer reservation.
+    let footer_height = area.height.min(5);
+    let header_height = header_height.min(area.height.saturating_sub(footer_height));
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(header_height),
-            Constraint::Min(1),
+            Constraint::Min(0),
             Constraint::Length(footer_height),
         ])
         .split(area);

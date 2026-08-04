@@ -87,6 +87,7 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('c'),
                     modifiers,
+                    kind: event::KeyEventKind::Press,
                     ..
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
                     if let Some(token) = &cancel {
@@ -96,7 +97,9 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 Event::Key(KeyEvent {
-                    code: KeyCode::Esc, ..
+                    code: KeyCode::Esc,
+                    kind: event::KeyEventKind::Press,
+                    ..
                 }) => {
                     if let Some(token) = &cancel {
                         token.cancel();
@@ -104,6 +107,7 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Backspace,
+                    kind: event::KeyEventKind::Press,
                     ..
                 }) => {
                     composer.pop();
@@ -120,6 +124,7 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Enter,
+                    kind: event::KeyEventKind::Press,
                     ..
                 }) => {
                     let prompt = std::mem::take(&mut composer);
