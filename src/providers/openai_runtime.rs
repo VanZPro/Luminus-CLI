@@ -348,53 +348,50 @@ mod tests {
     }
 
     #[test]
-    fn runtime_provider_selects_by_environment() {
+    fn env_configuration_is_deterministic() {
+        // All environment scenarios run sequentially in one test so parallel
+        // tests cannot race on the same variables.
         unsafe {
             std::env::remove_var("OPENAI_API_KEY");
             std::env::remove_var("LUMINUS_OPENAI_API_KEY");
             std::env::remove_var("OPENAI_BASE_URL");
             std::env::remove_var("OPENAI_MODEL");
         }
+
+        // No key configured -> fall back to the fake provider.
         assert!(!RuntimeProvider::from_env_or_fake(Duration::from_millis(1)).is_openai());
 
+        // Valid key + base + model -> real OpenAI provider with the model id.
         unsafe {
             std::env::set_var("OPENAI_API_KEY", "test-key");
             std::env::set_var("OPENAI_BASE_URL", "https://example.test/v1/");
             std::env::set_var("OPENAI_MODEL", "stub-model");
         }
         let provider = RuntimeProvider::from_env_or_fake(Duration::from_millis(1));
+        assert!(provider.is_openai());
+        assert_eq!(provider.model().id, "stub-model");
+
+        // Key present but invalid base URL -> configuration error, not fallback.
+        unsafe {
+            std::env::set_var("OPENAI_BASE_URL", "nonsense");
+        }
+        assert!(matches!(
+            OpenAiProvider::from_env(),
+            Some(Err(OpenAiError::InvalidEndpoint))
+        ));
+
+        // Blank key counts as absent.
+        unsafe {
+            std::env::set_var("OPENAI_API_KEY", "   ");
+            std::env::set_var("OPENAI_BASE_URL", "https://example.test/v1/");
+        }
+        assert!(OpenAiProvider::from_env().is_none());
+
         unsafe {
             std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("LUMINUS_OPENAI_API_KEY");
             std::env::remove_var("OPENAI_BASE_URL");
             std::env::remove_var("OPENAI_MODEL");
         }
-        assert!(provider.is_openai());
-        assert_eq!(provider.model().id, "stub-model");
-    }
-
-    #[test]
-    fn from_env_rejects_invalid_base_url() {
-        unsafe {
-            std::env::set_var("OPENAI_API_KEY", "test-key");
-            std::env::set_var("OPENAI_BASE_URL", "nonsense");
-        }
-        let result = OpenAiProvider::from_env();
-        unsafe {
-            std::env::remove_var("OPENAI_API_KEY");
-            std::env::remove_var("OPENAI_BASE_URL");
-        }
-        assert!(matches!(result, Some(Err(OpenAiError::InvalidEndpoint))));
-    }
-
-    #[test]
-    fn empty_api_key_falls_back_to_none() {
-        unsafe {
-            std::env::set_var("OPENAI_API_KEY", "   ");
-        }
-        let result = OpenAiProvider::from_env();
-        unsafe {
-            std::env::remove_var("OPENAI_API_KEY");
-        }
-        assert!(result.is_none());
     }
 }

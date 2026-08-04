@@ -2,8 +2,7 @@
 target/
 
 # Local generated codebase-memory artifacts
-.codebase-memory/artifact.json
-.codebase-memory/graph.db.zst
+.codebase-memory/
 
 # Local environment and editor files
 .env
