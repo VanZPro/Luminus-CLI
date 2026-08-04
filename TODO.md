@@ -31,11 +31,26 @@ Milestone 1 library and binary checks pass on Windows with stable Rust. The inte
 - [x] Responsive viewport fix for tiny terminals
 - [x] Structured tool activity events and cards
 
+## Phase 7 completed
+
+- [x] Interactive model selector overlay (Ctrl+M, arrow keys, Enter, Esc)
+- [x] Model selection state and centered responsive popup rendering
+
+## Phase 8 completed
+
+- [x] Real OpenAI-compatible HTTP provider adapter
+- [x] Streaming SSE and non-streaming JSON completion handling
+- [x] Runtime provider selection with fake fallback
+- [x] Environment credentials: OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL
+- [x] `/provider openai`, `/provider fake`, and current-provider status
+- [x] Stub-transport tests for streaming, cancellation, API errors, and env config
+- [x] Formatting, Clippy, workspace tests, and release build
+
 ## Next priorities
 
-- [ ] Add interactive model selector overlay (currently command-only)
-- [ ] Add real OpenAI-compatible provider adapter
-- [ ] Wire real provider credentials from environment
+- [ ] Provider model catalog/discovery endpoint
+- [ ] Sessions and context persistence
+- [ ] Coding tools, permissions, approvals, and diffs
 
 - Real providers and credentials
 - Coding tools, permissions, approvals, and diffs

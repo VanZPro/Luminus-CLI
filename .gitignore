@@ -1,0 +1,13 @@
+# Rust build artifacts
+target/
+
+# Local generated codebase-memory artifacts
+.codebase-memory/artifact.json
+.codebase-memory/graph.db.zst
+
+# Local environment and editor files
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
