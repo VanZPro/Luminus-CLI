@@ -24,12 +24,18 @@ Milestone 1 library and binary checks pass on Windows with stable Rust. The inte
 - [x] Status/composer TUI region with model/mode/context/safety indicators
 - [x] Phase 2 tests, formatting, Clippy, and release build
 
-## Phase 2 follow-up
+## Phase 6 completed
 
-- [ ] Connect real composer text to the rendered composer region
-- [ ] Add a real model selector overlay
-- [ ] Add a real OpenAI-compatible provider adapter
-- [ ] Add structured tool activity events and cards
+- [x] Connect real composer text to the rendered composer region
+- [x] Keyboard double-typing fix (KeyEventKind::Press filter)
+- [x] Responsive viewport fix for tiny terminals
+- [x] Structured tool activity events and cards
+
+## Next priorities
+
+- [ ] Add interactive model selector overlay (currently command-only)
+- [ ] Add real OpenAI-compatible provider adapter
+- [ ] Wire real provider credentials from environment
 
 - Real providers and credentials
 - Coding tools, permissions, approvals, and diffs
