@@ -83,7 +83,47 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if event::poll(Duration::from_millis(40))? {
-            match event::read()? {
+            let ev = event::read()?;
+
+            // Model selector overlay intercepts keys while open.
+            if app.ui_mode() == luminus::app::UiMode::ModelSelector {
+                if let Event::Key(KeyEvent {
+                    code,
+                    kind: event::KeyEventKind::Press,
+                    ..
+                }) = ev
+                {
+                    match code {
+                        KeyCode::Esc => app.hide_model_selector(),
+                        KeyCode::Up => app.model_selector_prev(),
+                        KeyCode::Down => app.model_selector_next(),
+                        KeyCode::Enter => {
+                            let selected_role = model_catalog
+                                .list()
+                                .get(app.model_selector_index)
+                                .map(|sel| sel.role);
+                            app.hide_model_selector();
+                            if let Some(role) = selected_role {
+                                let message = match model_catalog.select_role(role) {
+                                    Ok(selection) => format!(
+                                        "Model selected: {} / {}",
+                                        selection.provider, selection.model
+                                    ),
+                                    Err(error) => error.to_string(),
+                                };
+                                app.start_request("command".into(), message);
+                                app.apply_provider_event(ProviderEvent::Completed {
+                                    request_id: "command".into(),
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                continue;
+            }
+
+            match ev {
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('c'),
                     modifiers,
@@ -95,6 +135,26 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         should_exit = true;
                     }
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('m'),
+                    modifiers,
+                    kind: event::KeyEventKind::Press,
+                    ..
+                }) if modifiers.contains(KeyModifiers::CONTROL) => {
+                    let items = model_catalog
+                        .list()
+                        .iter()
+                        .map(|sel| {
+                            let active = if model_catalog.active() == Some(sel) {
+                                " (active)"
+                            } else {
+                                ""
+                            };
+                            format!("{} -> {} / {}{}", sel.role, sel.provider, sel.model, active)
+                        })
+                        .collect();
+                    app.show_model_selector(items);
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Esc,

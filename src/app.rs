@@ -28,6 +28,14 @@ struct ActiveRequest {
     message_index: Option<usize>,
 }
 
+/// Application UI mode: normal chat or a modal overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UiMode {
+    #[default]
+    Normal,
+    ModelSelector,
+}
+
 /// Pure application state: a reducer over user input and provider events.
 #[derive(Debug, Default)]
 pub struct App {
@@ -35,9 +43,43 @@ pub struct App {
     pub tool_activities: Vec<ToolActivity>,
     request: Option<ActiveRequest>,
     context_budget: Option<ContextBudget>,
+    ui_mode: UiMode,
+    pub model_selector_index: usize,
+    pub model_selector_items: Vec<String>,
 }
 
 impl App {
+    /// Current UI mode.
+    pub fn ui_mode(&self) -> UiMode {
+        self.ui_mode
+    }
+
+    /// Show the model selector overlay with the given display items.
+    pub fn show_model_selector(&mut self, items: Vec<String>) {
+        self.ui_mode = UiMode::ModelSelector;
+        self.model_selector_index = 0;
+        self.model_selector_items = items;
+    }
+
+    /// Hide the model selector overlay.
+    pub fn hide_model_selector(&mut self) {
+        self.ui_mode = UiMode::Normal;
+        self.model_selector_items.clear();
+    }
+
+    /// Move the model selector cursor up.
+    pub fn model_selector_prev(&mut self) {
+        self.model_selector_index = self.model_selector_index.saturating_sub(1);
+    }
+
+    /// Move the model selector cursor down, clamped to the item count.
+    pub fn model_selector_next(&mut self) {
+        let max = self.model_selector_items.len().saturating_sub(1);
+        if self.model_selector_index < max {
+            self.model_selector_index += 1;
+        }
+    }
+
     /// Sets the context budget used for token accounting.
     pub fn set_context_budget(&mut self, budget: ContextBudget) {
         self.context_budget = Some(budget);

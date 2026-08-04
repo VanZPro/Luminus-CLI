@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-use crate::app::{App, Role};
+use crate::app::{App, Role, UiMode};
 use crate::tool_activity::ToolStatus;
 
 use super::{
@@ -61,6 +61,56 @@ pub(crate) fn draw_with_composer(frame: &mut Frame<'_>, app: &App, theme: Theme,
         render_conversation(frame, sections[1], app, theme);
     }
     render_status(frame, sections[2], theme, compact, app, composer);
+
+    if app.ui_mode() == UiMode::ModelSelector {
+        render_model_selector(frame, area, app, theme);
+    }
+}
+
+/// Centered popup listing configured models; Up/Down to move, Enter to select,
+/// Esc to dismiss.
+fn render_model_selector(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
+    let items = &app.model_selector_items;
+    let content_height = items.len() as u16 + 2; // borders
+    let width = area.width.saturating_sub(4).clamp(20, 60);
+    let height = content_height.min(area.height.saturating_sub(2)).max(3);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let lines: Vec<Line<'_>> = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            if i == app.model_selector_index {
+                Line::from(Span::styled(
+                    format!("> {item}"),
+                    Style::default()
+                        .fg(theme.background)
+                        .bg(theme.primary)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Line::from(Span::styled(
+                    format!("  {item}"),
+                    Style::default().fg(theme.foreground),
+                ))
+            }
+        })
+        .collect();
+
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" SELECT MODEL — ↑↓ move · Enter select · Esc close ")
+                .border_style(Style::default().fg(theme.accent))
+                .style(Style::default().bg(theme.background)),
+        ),
+        popup,
+    );
 }
 
 fn render_status(
