@@ -15,6 +15,7 @@ use luminus::{
     event::ProviderEvent,
     model::{ModelCatalog, ModelRole, ModelSelection},
     provider::{FakeProvider, Provider},
+    providers::openai_runtime::{OpenAiProvider, RuntimeProvider},
     tui::{self, Theme},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -57,7 +58,7 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
     let mut composer = String::new();
     let mut cancel: Option<CancellationToken> = None;
     let (provider_tx, mut provider_rx) = mpsc::unbounded_channel::<ProviderEvent>();
-    let provider = FakeProvider::new(Duration::from_millis(80));
+    let mut provider = RuntimeProvider::from_env_or_fake(Duration::from_millis(80));
     let mut model_catalog = ModelCatalog::new();
     for (role, model) in [
         (ModelRole::Default, "fake-model"),
@@ -214,10 +215,37 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                                 app.start_request("command".into(), message);
                             }
                             Ok(Command::Provider(name)) => {
-                                let text = if let Some(name) = name {
-                                    format!("Switching to provider: {name} (not yet implemented)")
-                                } else {
-                                    "Current provider: fake\nAvailable: fake, openai-compatible (via env)".to_owned()
+                                let text = match name {
+                                    Some(name) if name == "openai" || name == "openai-compatible" => {
+                                        match OpenAiProvider::from_env() {
+                                            Some(Ok(openai)) => {
+                                                let model = openai.model().id;
+                                                provider = RuntimeProvider::OpenAi(openai);
+                                                format!("Switched to provider: openai ({model})")
+                                            }
+                                            Some(Err(error)) => format!(
+                                                "OpenAI config error: {error} (set OPENAI_API_KEY)"
+                                            ),
+                                            None => {
+                                                "OpenAI not configured: set OPENAI_API_KEY (and optionally OPENAI_BASE_URL / OPENAI_MODEL)".to_owned()
+                                            }
+                                        }
+                                    }
+                                    Some(name) if name == "fake" => {
+                                        provider = RuntimeProvider::Fake(FakeProvider::new(
+                                            Duration::from_millis(80),
+                                        ));
+                                        "Switched to provider: fake".to_owned()
+                                    }
+                                    Some(other) => format!("Unknown provider: {other}"),
+                                    None => format!(
+                                        "Current provider: {}\nAvailable: fake, openai (via env)",
+                                        if provider.is_openai() {
+                                            "openai"
+                                        } else {
+                                            "fake"
+                                        }
+                                    ),
                                 };
                                 app.start_request("command".into(), text);
                             }
@@ -252,7 +280,7 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                         app.start_request(request_id.clone(), prompt.clone());
                         cancel = Some(token.clone());
                         let tx = provider_tx.clone();
-                        let p = provider;
+                        let p = provider.clone();
                         tokio::spawn(async move {
                             for event in p.stream(request_id, prompt, token).await {
                                 let _ = tx.send(event);

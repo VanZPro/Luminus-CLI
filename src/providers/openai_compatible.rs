@@ -195,9 +195,16 @@ impl<T: OpenAiTransport> OpenAiCompatibleProvider<T> {
             return Err(parse_error(&response.body));
         }
         if request.stream {
-            Ok(ChatResult::Stream(
-                response.body.lines().map(parse_sse_line).collect(),
-            ))
+            // Some compatible endpoints ignore `stream=true` and return a
+            // regular JSON completion. Accept that response instead of
+            // silently producing an empty stream.
+            if response.body.trim_start().starts_with('{') {
+                Ok(ChatResult::Complete(parse_chat_completion(&response.body)?))
+            } else {
+                Ok(ChatResult::Stream(
+                    response.body.lines().map(parse_sse_line).collect(),
+                ))
+            }
         } else {
             Ok(ChatResult::Complete(parse_chat_completion(&response.body)?))
         }
