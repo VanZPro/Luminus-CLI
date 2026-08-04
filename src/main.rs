@@ -57,6 +57,7 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::default();
     let mut composer = String::new();
     let mut cancel: Option<CancellationToken> = None;
+    let mut agent_cancel: Option<CancellationToken> = None;
     let (provider_tx, mut provider_rx) = mpsc::unbounded_channel::<ProviderEvent>();
     let mut provider = RuntimeProvider::from_env_or_fake(Duration::from_millis(80));
     let mut model_catalog = ModelCatalog::new();
@@ -77,10 +78,16 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
         })?;
 
         while let Ok(event) = provider_rx.try_recv() {
-            if event.is_terminal() {
-                cancel = None;
+            if app.apply_agent_event(&event) {
+                if event.is_terminal() {
+                    agent_cancel = None;
+                }
+            } else {
+                if event.is_terminal() {
+                    cancel = None;
+                }
+                app.apply_provider_event(event);
             }
-            app.apply_provider_event(event);
         }
 
         if event::poll(Duration::from_millis(40))? {
@@ -162,7 +169,9 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                     kind: event::KeyEventKind::Press,
                     ..
                 }) => {
-                    if let Some(token) = &cancel {
+                    if let Some(token) = &agent_cancel {
+                        token.cancel();
+                    } else if let Some(token) = &cancel {
                         token.cancel();
                     }
                 }
@@ -248,6 +257,34 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                                     ),
                                 };
                                 app.start_request("command".into(), text);
+                            }
+                            Ok(Command::Spawn(child_prompt)) => {
+                                if app.active_agent_request_id().is_some() {
+                                    app.start_request(
+                                        "command".into(),
+                                        "An agent is already running. Press Esc to cancel it first.".into(),
+                                    );
+                                } else {
+                                    let request_id = Uuid::new_v4().to_string();
+                                    let agent_id = luminus::agent::short_id(&request_id);
+                                    let token = CancellationToken::new();
+                                    if app.start_agent(
+                                        agent_id.clone(),
+                                        request_id.clone(),
+                                        child_prompt.clone(),
+                                    ) {
+                                        agent_cancel = Some(token.clone());
+                                        let tx = provider_tx.clone();
+                                        let p = provider.clone();
+                                        tokio::spawn(async move {
+                                            for event in
+                                                p.stream(request_id, child_prompt, token).await
+                                            {
+                                                let _ = tx.send(event);
+                                            }
+                                        });
+                                    }
+                                }
                             }
                             Ok(Command::Models) => {
                                 use crate::command::help_text;

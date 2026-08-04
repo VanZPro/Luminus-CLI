@@ -46,6 +46,15 @@ Milestone 1 library and binary checks pass on Windows with stable Rust. The inte
 - [x] Stub-transport tests for streaming, cancellation, API errors, and env config
 - [x] Formatting, Clippy, workspace tests, and release build
 
+## Phase 9 completed
+
+- [x] `/spawn <prompt>` command with validation and help text
+- [x] Independent child-agent lifecycle and event routing
+- [x] Single active-agent policy with cancellation priority
+- [x] Agent status/output rendering in the conversation view
+- [x] Reducer, command, and TUI integration tests
+- [x] Formatting, Clippy, workspace tests, and release build
+
 ## Next priorities
 
 - [ ] Provider model catalog/discovery endpoint

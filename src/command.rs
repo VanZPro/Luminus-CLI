@@ -13,6 +13,8 @@ pub enum Command {
     Provider(Option<String>),
     /// `/models` lists the configured roles and their models.
     Models,
+    /// Spawn one independent child-agent request.
+    Spawn(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +42,7 @@ pub fn help_text() -> String {
         "  /models            list configured roles and their models",
         "  /provider          list/show providers",
         "  /provider <name>   switch to the named provider",
+        "  /spawn <prompt>    run a child agent on the active provider",
     ]
     .join("\n")
 }
@@ -53,6 +56,15 @@ pub fn parse_command(input: &str) -> Result<Command, ParseCommandError> {
         "/exit" => Ok(Command::Exit),
         "/provider" => Ok(Command::Provider(None)),
         "/models" => Ok(Command::Models),
+        command if command.starts_with("/spawn ") => {
+            let prompt = command.strip_prefix("/spawn ").unwrap().trim();
+            if prompt.is_empty() {
+                return Err(ParseCommandError {
+                    command: command.to_owned(),
+                });
+            }
+            Ok(Command::Spawn(prompt.to_owned()))
+        }
         command if command.starts_with("/provider ") => {
             let name = command.strip_prefix("/provider ").unwrap();
             if name.is_empty() || name.contains(char::is_whitespace) {
@@ -96,9 +108,20 @@ mod tests {
     #[test]
     fn rejects_everything_else() {
         assert!(parse_command("/model").is_err());
+        assert!(parse_command("/spawn").is_err());
+        assert!(parse_command("/spawn   ").is_err());
         assert!(parse_command("help").is_err());
         assert!(parse_command("/HELP").is_err());
         assert!(parse_command("/help now").is_err());
+    }
+
+    #[test]
+    fn parses_spawn_prompt_and_help_mentions_it() {
+        assert_eq!(
+            parse_command("/spawn  inspect the architecture  "),
+            Ok(Command::Spawn("inspect the architecture".into()))
+        );
+        assert!(help_text().contains("/spawn"));
     }
 
     #[test]

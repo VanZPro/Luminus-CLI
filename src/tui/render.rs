@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
+use crate::agent::AgentStatus;
 use crate::app::{App, Role, UiMode};
 use crate::tool_activity::ToolStatus;
 
@@ -353,6 +354,41 @@ fn tool_activity_lines(app: &App, theme: Theme) -> Vec<Line<'static>> {
     lines
 }
 
+fn agent_run_lines(app: &App, theme: Theme) -> Vec<Line<'static>> {
+    if app.agent_runs.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![Line::from("")];
+    lines.push(Line::from(Span::styled(
+        "AGENTS".to_owned(),
+        Style::default()
+            .fg(theme.muted)
+            .add_modifier(Modifier::BOLD),
+    )));
+    for run in &app.agent_runs {
+        let (marker, color, detail) = match &run.status {
+            AgentStatus::Running => ("●", theme.accent, format!("running: {}", run.prompt)),
+            AgentStatus::Completed => ("✓", theme.primary, "completed".to_owned()),
+            AgentStatus::Cancelled => ("-", theme.muted, "cancelled".to_owned()),
+            AgentStatus::Failed(error) => ("✗", Color::Red, format!("failed: {error}")),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{marker} agent-{} ", run.agent_id),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(detail, Style::default().fg(theme.foreground)),
+        ]));
+        if !run.output.is_empty() && !matches!(run.status, AgentStatus::Running) {
+            lines.push(Line::from(Span::styled(
+                format!("  output: {}", run.output),
+                Style::default().fg(theme.foreground),
+            )));
+        }
+    }
+    lines
+}
+
 fn render_conversation(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     let mut lines: Vec<Line<'static>> = if app.messages.is_empty() {
         vec![Line::from(Span::styled(
@@ -383,6 +419,7 @@ fn render_conversation(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Them
     };
 
     lines.extend(tool_activity_lines(app, theme));
+    lines.extend(agent_run_lines(app, theme));
     let body = Text::from(lines);
 
     frame.render_widget(

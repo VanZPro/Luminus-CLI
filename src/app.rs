@@ -1,3 +1,4 @@
+use crate::agent::{AgentRun, AgentStatus};
 use crate::context::ContextBudget;
 use crate::event::ProviderEvent;
 use crate::tool_activity::ToolActivity;
@@ -46,6 +47,8 @@ pub struct App {
     ui_mode: UiMode,
     pub model_selector_index: usize,
     pub model_selector_items: Vec<String>,
+    /// Tracked spawned agents, newest last.
+    pub agent_runs: Vec<AgentRun>,
 }
 
 impl App {
@@ -78,6 +81,36 @@ impl App {
         if self.model_selector_index < max {
             self.model_selector_index += 1;
         }
+    }
+
+    /// Starts one child-agent run. Phase 9 permits only one active child.
+    pub fn start_agent(&mut self, agent_id: String, request_id: String, prompt: String) -> bool {
+        if self
+            .agent_runs
+            .iter()
+            .any(|run| run.status == AgentStatus::Running)
+        {
+            return false;
+        }
+        self.agent_runs
+            .push(AgentRun::new(agent_id, request_id, prompt));
+        true
+    }
+
+    /// Routes an event to a child agent, returning whether it matched one.
+    pub fn apply_agent_event(&mut self, event: &ProviderEvent) -> bool {
+        self.agent_runs
+            .iter_mut()
+            .find(|run| run.request_id == event.request_id())
+            .is_some_and(|run| run.apply_event(event))
+    }
+
+    /// Returns the currently running child-agent request, if any.
+    pub fn active_agent_request_id(&self) -> Option<&str> {
+        self.agent_runs
+            .iter()
+            .find(|run| run.status == AgentStatus::Running)
+            .map(|run| run.request_id.as_str())
     }
 
     /// Sets the context budget used for token accounting.
@@ -170,6 +203,7 @@ impl App {
     pub fn clear(&mut self) {
         self.messages.clear();
         self.tool_activities.clear();
+        self.agent_runs.clear();
         self.request = None;
     }
 }
