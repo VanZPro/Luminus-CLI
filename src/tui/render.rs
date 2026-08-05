@@ -9,6 +9,7 @@ use ratatui::{
 use crate::agent::AgentStatus;
 use crate::app::{App, Role, UiMode};
 use crate::tool_activity::ToolStatus;
+use crate::tools;
 
 use super::{
     logo::{self, ASCII_BANNER, TAGLINE},
@@ -76,8 +77,16 @@ fn render_approval_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, theme: 
     let Some(approval) = app.pending_approval.as_ref() else {
         return;
     };
-    let width = area.width.saturating_sub(6).clamp(34, 76);
-    let height = 8.min(area.height.saturating_sub(2)).max(5);
+    let metadata = approval.metadata().ok();
+    let width = area.width.saturating_sub(6).clamp(48, 92);
+    let base_height = 9;
+    let extra = metadata
+        .as_ref()
+        .map(|m| 1 + m.affected_paths.len().min(4) + if m.reason.is_empty() { 0 } else { 1 })
+        .unwrap_or(0);
+    let height = (base_height + extra as u16)
+        .min(area.height.saturating_sub(2))
+        .max(6);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     let popup = Rect::new(x, y, width, height);
@@ -88,13 +97,42 @@ fn render_approval_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, theme: 
     } else {
         format!(" {}", approval.request.args.join(" "))
     };
-    let lines = vec![
+    let mut lines: Vec<Line<'_>> = vec![
         Line::from(format!("Tool: {}", approval.spec.name)),
         Line::from(format!("Permission: {}", approval.spec.permission.label())),
         Line::from(format!("Command: /tool {}{}", approval.spec.name, args)),
-        Line::from(""),
-        Line::from("Press Y/Enter to approve · N/Esc to reject"),
     ];
+    if let Some(metadata) = &metadata {
+        lines.push(Line::from(format!(
+            "Working dir: {}",
+            metadata.cwd.display()
+        )));
+        if !metadata.affected_paths.is_empty() {
+            let mut shown = metadata.affected_paths.iter().take(4).peekable();
+            let mut paths = String::from("Affected paths:");
+            while let Some(path) = shown.next() {
+                paths.push_str("\n  ");
+                paths.push_str(&path.display().to_string());
+                if shown.peek().is_none() {
+                    break;
+                }
+            }
+            for line in paths.split('\n') {
+                lines.push(Line::from(line.to_string()));
+            }
+        }
+        if !metadata.reason.is_empty() {
+            lines.push(Line::from(format!("Reason: {}", metadata.reason)));
+        }
+        lines.push(Line::from(format!(
+            "Risk: {} · Decision: {}",
+            risk_label(metadata.risk),
+            decision_label(metadata.decision)
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from("Press Y/Enter to approve · N/Esc to reject"));
+
     frame.render_widget(
         Paragraph::new(lines)
             .block(
@@ -107,6 +145,25 @@ fn render_approval_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, theme: 
             .wrap(Wrap { trim: false }),
         popup,
     );
+}
+
+fn risk_label(risk: tools::RiskLevel) -> &'static str {
+    use tools::RiskLevel;
+    match risk {
+        RiskLevel::Low => "low",
+        RiskLevel::Medium => "medium",
+        RiskLevel::High => "high",
+        RiskLevel::Critical => "critical",
+    }
+}
+
+fn decision_label(decision: tools::PermissionDecision) -> &'static str {
+    use tools::PermissionDecision;
+    match decision {
+        PermissionDecision::Allow => "allow",
+        PermissionDecision::Ask => "ask",
+        PermissionDecision::Deny => "deny",
+    }
 }
 
 fn render_model_selector(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {

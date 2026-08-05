@@ -4,7 +4,28 @@
 //! validates names/arguments and returns an approval request; callers must
 //! explicitly approve before invoking a tool.
 
-use std::{fs, io, path::PathBuf, process::Command};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+/// The outcome of policy evaluation before a caller approves execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionDecision {
+    Allow,
+    Ask,
+    Deny,
+}
+
+/// Coarse risk tier used by callers to decide how to surface approval prompts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RiskLevel {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Permission {
@@ -44,6 +65,22 @@ pub struct ApprovalRequest {
     pub spec: ToolSpec,
 }
 
+/// Resolved approval metadata for UI prompts and policy decisions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalMetadata {
+    pub decision: PermissionDecision,
+    pub risk: RiskLevel,
+    pub cwd: PathBuf,
+    pub affected_paths: Vec<PathBuf>,
+    pub reason: String,
+}
+
+impl ApprovalRequest {
+    pub fn metadata(&self) -> Result<ApprovalMetadata, ToolError> {
+        metadata_for(&self.spec, &self.request.args)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolOutput {
     pub tool: String,
@@ -58,6 +95,7 @@ pub enum ToolError {
     Io(String),
     Process(String),
     NetworkDisabled,
+    SecurityDenied(String),
 }
 
 impl std::fmt::Display for ToolError {
@@ -71,6 +109,9 @@ impl std::fmt::Display for ToolError {
             Self::Io(error) => write!(f, "I/O error: {error}"),
             Self::Process(error) => write!(f, "process error: {error}"),
             Self::NetworkDisabled => f.write_str("network tools are disabled in this phase"),
+            Self::SecurityDenied(reason) => {
+                write!(f, "security policy denied request: {reason}")
+            }
         }
     }
 }
@@ -113,6 +154,10 @@ impl ToolRegistry {
         &TOOL_SPECS
     }
 
+    /// Validate arguments, canonicalize affected paths, classify risk, and
+    /// produce a [`PermissionDecision`]. Deny decisions short-circuit as a
+    /// [`ToolError::SecurityDenied`] so callers never see an approval prompt
+    /// for blocked actions.
     pub fn prepare(&self, request: ToolRequest) -> Result<ApprovalRequest, ToolError> {
         let spec = TOOL_SPECS
             .iter()
@@ -120,20 +165,34 @@ impl ToolRegistry {
             .cloned()
             .ok_or_else(|| ToolError::UnknownTool(request.name.clone()))?;
         validate_args(&spec, &request.args)?;
+
+        let metadata = metadata_for(&spec, &request.args)?;
+        if metadata.decision == PermissionDecision::Deny {
+            return Err(ToolError::SecurityDenied(metadata.reason));
+        }
+
         Ok(ApprovalRequest { request, spec })
     }
 
     pub fn execute(&self, approval: &ApprovalRequest) -> Result<ToolOutput, ToolError> {
         let args = &approval.request.args;
+        let metadata = approval.metadata()?;
+        if metadata.decision == PermissionDecision::Deny {
+            return Err(ToolError::SecurityDenied(metadata.reason));
+        }
         let output = match approval.request.name.as_str() {
-            "read_file" => {
-                fs::read_to_string(&args[0]).map_err(|e| ToolError::Io(e.to_string()))?
-            }
+            "read_file" => fs::read_to_string(&metadata.affected_paths[0])
+                .map_err(|e| ToolError::Io(e.to_string()))?,
             "write_file" => {
-                fs::write(&args[0], &args[1]).map_err(|e| ToolError::Io(e.to_string()))?;
-                format!("wrote {} bytes to {}", args[1].len(), args[0])
+                fs::write(&metadata.affected_paths[0], &args[1])
+                    .map_err(|e| ToolError::Io(e.to_string()))?;
+                format!(
+                    "wrote {} bytes to {}",
+                    args[1].len(),
+                    metadata.affected_paths[0].display()
+                )
             }
-            "list_dir" => list_dir(&args[0])?,
+            "list_dir" => list_dir(&metadata.affected_paths[0])?,
             "run_shell" => run_shell(&args[0])?,
             "http_get" => return Err(ToolError::NetworkDisabled),
             _ => return Err(ToolError::UnknownTool(approval.request.name.clone())),
@@ -155,8 +214,160 @@ fn validate_args(spec: &ToolSpec, args: &[String]) -> Result<(), ToolError> {
     }
 }
 
-fn list_dir(path: &str) -> Result<String, ToolError> {
-    let mut entries = fs::read_dir(PathBuf::from(path))
+/// Canonicalized project root. `current_dir` is used directly (not
+/// `fs::canonicalize`, which on Windows prefixes `\\?\` and breaks
+/// `starts_with` comparisons against non-canonical relative paths).
+fn project_root() -> Result<PathBuf, ToolError> {
+    std::env::current_dir().map_err(|e| ToolError::Io(e.to_string()))
+}
+
+/// Strip the Windows verbatim prefix (`\\?\`) so canonicalized paths compare
+/// correctly against non-canonicalized `current_dir` paths via `starts_with`.
+fn strip_verbatim(path: PathBuf) -> PathBuf {
+    let s = path.to_string_lossy().into_owned();
+    if let Some(stripped) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(r"\\").join(stripped)
+    } else if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped)
+    } else {
+        path
+    }
+}
+
+fn metadata_for(spec: &ToolSpec, args: &[String]) -> Result<ApprovalMetadata, ToolError> {
+    let cwd = project_root()?;
+    let affected_paths = if matches!(spec.name, "read_file" | "write_file" | "list_dir") {
+        vec![safe_path(&args[0], &cwd)?]
+    } else {
+        Vec::new()
+    };
+    let (decision, risk, reason) = classify(spec, args);
+    Ok(ApprovalMetadata {
+        decision,
+        risk,
+        cwd,
+        affected_paths,
+        reason,
+    })
+}
+
+/// Canonicalize `raw` against `cwd`, enforce project-root containment for
+/// relative inputs, and reject sensitive credential/key paths.
+fn safe_path(raw: &str, cwd: &Path) -> Result<PathBuf, ToolError> {
+    let input = PathBuf::from(raw);
+    let candidate = if input.is_absolute() {
+        input.clone()
+    } else {
+        cwd.join(&input)
+    };
+
+    // Canonicalize the existing portion (parent must exist for a file we are
+    // about to create) and re-append the leaf so non-existent files still get a
+    // normalized absolute path.
+    let canonical = strip_verbatim(
+        if candidate.exists() {
+            fs::canonicalize(&candidate)
+        } else {
+            let parent = candidate.parent().unwrap_or(cwd);
+            fs::canonicalize(parent).map(|p| p.join(candidate.file_name().unwrap_or_default()))
+        }
+        .map_err(|e| ToolError::Io(e.to_string()))?,
+    );
+
+    // Project-root containment: relative inputs must not escape cwd after
+    // symlink/traversal normalization.
+    if !input.is_absolute() && !canonical.starts_with(cwd) {
+        return Err(ToolError::SecurityDenied(
+            "path escapes project root".into(),
+        ));
+    }
+
+    if is_sensitive(&canonical) {
+        return Err(ToolError::SecurityDenied("sensitive path".into()));
+    }
+
+    Ok(canonical)
+}
+
+/// Return true for credential, key, and SSH/AWS config paths that must never be
+/// read or written through the tool layer.
+fn is_sensitive(path: &Path) -> bool {
+    let normalized = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+
+    name == ".env"
+        || name.starts_with(".env.")
+        || name.ends_with(".key")
+        || name.ends_with(".pem")
+        || name.ends_with(".p12")
+        || name.ends_with(".pfx")
+        || normalized.contains("/.ssh/")
+        || normalized.contains("/.aws/")
+        || normalized.contains("/.config/gcloud/")
+        || normalized.contains("credentials")
+        || normalized.contains("secrets")
+}
+
+/// Produce a (decision, risk, reason) triple for a tool request. Deny is used
+/// for hard policy blocks (network, destructive shell). Everything else asks.
+fn classify(spec: &ToolSpec, args: &[String]) -> (PermissionDecision, RiskLevel, String) {
+    if spec.name == "http_get" {
+        return (
+            PermissionDecision::Deny,
+            RiskLevel::Critical,
+            "network disabled".into(),
+        );
+    }
+
+    if spec.name == "run_shell" && destructive_command(&args[0]) {
+        return (
+            PermissionDecision::Deny,
+            RiskLevel::Critical,
+            "destructive shell command blocked".into(),
+        );
+    }
+
+    let risk = match spec.permission {
+        Permission::ReadOnly => RiskLevel::Low,
+        Permission::Write => RiskLevel::Medium,
+        Permission::Execute => RiskLevel::High,
+        Permission::Network => RiskLevel::Critical,
+    };
+
+    (
+        PermissionDecision::Ask,
+        risk,
+        format!("{} permission requires approval", spec.permission.label()),
+    )
+}
+
+/// Match a small denylist of destructive commands across POSIX and Windows
+/// shells. This is defense-in-depth, not a sandbox.
+fn destructive_command(command: &str) -> bool {
+    let c = command.to_ascii_lowercase();
+    const DENYLIST: &[&str] = &[
+        "rm -rf",
+        "rmdir /s",
+        "del /f",
+        "format ",
+        "shutdown",
+        "reboot",
+        "mkfs",
+        "diskpart",
+        "git reset --hard",
+        "git clean -fd",
+    ];
+    DENYLIST.iter().any(|needle| c.contains(needle))
+}
+
+fn list_dir(path: &Path) -> Result<String, ToolError> {
+    let mut entries = fs::read_dir(path)
         .map_err(|e| ToolError::Io(e.to_string()))?
         .filter_map(Result::ok)
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
@@ -215,10 +426,15 @@ mod tests {
         let approval = registry
             .prepare(ToolRequest {
                 name: "read_file".into(),
-                args: vec!["README.md".into()],
+                args: vec!["Cargo.toml".into()],
             })
             .unwrap();
         assert_eq!(approval.spec.permission, Permission::ReadOnly);
+        let metadata = approval.metadata().unwrap();
+        assert_eq!(metadata.decision, PermissionDecision::Ask);
+        assert_eq!(metadata.risk, RiskLevel::Low);
+        assert!(!metadata.reason.is_empty());
+        assert!(!metadata.affected_paths.is_empty());
         assert!(matches!(
             registry.prepare(ToolRequest {
                 name: "read_file".into(),
@@ -229,15 +445,48 @@ mod tests {
     }
 
     #[test]
-    fn network_tool_is_explicitly_disabled() {
+    fn network_tool_is_denied_at_prepare() {
         let registry = ToolRegistry;
-        let approval = registry
-            .prepare(ToolRequest {
-                name: "http_get".into(),
-                args: vec!["https://example.test".into()],
-            })
-            .unwrap();
-        assert_eq!(registry.execute(&approval), Err(ToolError::NetworkDisabled));
+        let result = registry.prepare(ToolRequest {
+            name: "http_get".into(),
+            args: vec!["https://example.test".into()],
+        });
+        assert!(matches!(result, Err(ToolError::SecurityDenied(_))));
+    }
+
+    #[test]
+    fn destructive_shell_is_denied_at_prepare() {
+        let registry = ToolRegistry;
+        let result = registry.prepare(ToolRequest {
+            name: "run_shell".into(),
+            args: vec!["rm -rf /".into()],
+        });
+        assert!(
+            matches!(result, Err(ToolError::SecurityDenied(ref r)) if r.contains("destructive"))
+        );
+    }
+
+    #[test]
+    fn sensitive_env_path_is_denied() {
+        let registry = ToolRegistry;
+        let result = registry.prepare(ToolRequest {
+            name: "read_file".into(),
+            args: vec![".env".into()],
+        });
+        assert!(matches!(result, Err(ToolError::SecurityDenied(ref r)) if r.contains("sensitive")));
+    }
+
+    #[test]
+    fn traversal_escape_is_denied() {
+        let registry = ToolRegistry;
+        let result = registry.prepare(ToolRequest {
+            name: "read_file".into(),
+            args: vec!["../../../../etc/passwd".into()],
+        });
+        assert!(matches!(
+            result,
+            Err(ToolError::SecurityDenied(_)) | Err(ToolError::Io(_))
+        ));
     }
 
     #[test]
