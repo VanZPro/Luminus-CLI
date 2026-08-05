@@ -7,6 +7,8 @@ pub mod model;
 pub mod providers;
 pub mod session;
 pub mod tool_activity;
+pub mod tool_event;
+pub mod tool_output;
 pub mod tools;
 
 /// Provider abstractions used by the application and the deterministic test provider.

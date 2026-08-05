@@ -279,12 +279,16 @@ impl App {
         }
     }
 
-    /// Removes all conversation history and any in-flight request tracking.
+    /// Removes all conversation history, in-flight request tracking, and any
+    /// transient UI/approval state so a stale approval overlay cannot survive
+    /// a reset.
     pub fn clear(&mut self) {
         self.messages.clear();
         self.tool_activities.clear();
         self.agent_runs.clear();
         self.request = None;
+        self.pending_approval = None;
+        self.ui_mode = UiMode::Normal;
     }
 }
 
