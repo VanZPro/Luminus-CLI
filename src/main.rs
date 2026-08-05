@@ -16,6 +16,7 @@ use luminus::{
     model::{ModelCatalog, ModelRole, ModelSelection},
     provider::{FakeProvider, ModelDiscovery, Provider},
     providers::openai_runtime::{OpenAiProvider, RuntimeProvider},
+    session::{Session, default_root},
     tui::{self, Theme},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -298,6 +299,43 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                 });
+                            }
+                            Ok(Command::Save(name)) => {
+                                let session = app.snapshot_session(name.clone());
+                                let text = match session.save(default_root()) {
+                                    Ok(path) => format!("Session saved: {}", path.display()),
+                                    Err(error) => format!("Session save failed: {error}"),
+                                };
+                                app.start_request("command".into(), text);
+                            }
+                            Ok(Command::Sessions) => {
+                                let text = match Session::list(default_root()) {
+                                    Ok(names) if names.is_empty() => {
+                                        "No saved sessions.".to_owned()
+                                    }
+                                    Ok(names) => format!(
+                                        "Saved sessions:\n{}",
+                                        names
+                                            .iter()
+                                            .map(|n| format!("  - {n}"))
+                                            .collect::<Vec<_>>()
+                                            .join("\n")
+                                    ),
+                                    Err(error) => format!("Session listing failed: {error}"),
+                                };
+                                app.start_request("command".into(), text);
+                            }
+                            Ok(Command::Load(name)) => {
+                                let text = match Session::load(default_root(), &name) {
+                                    Ok(session) => {
+                                        app.restore_session(&session);
+                                        format!("Session loaded: {}", session.name)
+                                    }
+                                    Err(error) => format!("Session load failed: {error}"),
+                                };
+                                if !app.messages.iter().any(|message| message.content == text) {
+                                    app.start_request("command".into(), text);
+                                }
                             }
                             Ok(Command::Spawn(child_prompt)) => {
                                 if app.active_agent_request_id().is_some() {

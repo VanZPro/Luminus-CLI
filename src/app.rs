@@ -1,7 +1,9 @@
 use crate::agent::{AgentRun, AgentStatus};
 use crate::context::ContextBudget;
 use crate::event::ProviderEvent;
+use crate::session::{SavedMessage, Session};
 use crate::tool_activity::ToolActivity;
+use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -14,6 +16,36 @@ pub enum Role {
 pub struct Message {
     pub role: Role,
     pub content: String,
+}
+
+impl From<&Message> for SavedMessage {
+    fn from(message: &Message) -> Self {
+        Self {
+            role: message.role.to_string(),
+            content: message.content.clone(),
+        }
+    }
+}
+
+impl Role {
+    pub fn from_saved(value: &str) -> Option<Self> {
+        match value {
+            "user" => Some(Self::User),
+            "assistant" => Some(Self::Assistant),
+            "system" => Some(Self::System),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for Role {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::System => "system",
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +84,24 @@ pub struct App {
 }
 
 impl App {
+    pub fn snapshot_session(&self, name: impl Into<String>) -> Session {
+        Session::new(name, self.messages.iter().map(SavedMessage::from).collect())
+    }
+
+    pub fn restore_session(&mut self, session: &Session) {
+        self.clear();
+        self.messages = session
+            .messages
+            .iter()
+            .filter_map(|message| {
+                Role::from_saved(&message.role).map(|role| Message {
+                    role,
+                    content: message.content.clone(),
+                })
+            })
+            .collect();
+    }
+
     /// Current UI mode.
     pub fn ui_mode(&self) -> UiMode {
         self.ui_mode

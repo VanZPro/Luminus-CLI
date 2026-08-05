@@ -13,6 +13,8 @@ Luminus is a terminal-native AI assistant written in Rust. It provides a respons
 - Runtime provider selection with `/provider`.
 - Role-based model selector (`Ctrl+M`) and `/model <role>`.
 - Provider model discovery through `/discover` and `GET /models`.
+- Persistent JSON sessions with `/save`, `/sessions`, and `/load`.
+- Atomic session writes with sanitized names and platform-aware data directories.
 - Request cancellation with `Esc` and `Ctrl+C`.
 - Child agents using `/spawn <prompt>` with separate lifecycle, output, and cancellation state.
 - Single-active-child-agent policy to prevent request-state conflicts.
@@ -139,6 +141,9 @@ luminus
 | `/model <role>` | Select a model role |
 | `/models` | List configured role/model mappings |
 | `/discover` | Query the active provider's `/models` endpoint |
+| `/save <name>` | Save the current conversation to disk |
+| `/sessions` | List saved conversations |
+| `/load <name>` | Restore a saved conversation |
 | `/provider` | Show the current provider |
 | `/provider fake` | Switch to offline fake provider |
 | `/provider openai` | Switch to configured OpenAI-compatible provider |
@@ -165,7 +170,7 @@ The current debugging pass verified:
 
 Known limitations:
 
-- Session persistence is not implemented yet; `/clear` removes the current in-memory conversation.
+- Sessions are persisted as JSON under the platform data directory. Set `LUMINUS_DATA_DIR` to override it; `/clear` still removes only the current in-memory conversation.
 - The model catalog is currently in-memory and role-based.
 - Only one child agent may run at a time.
 - Tool execution, permissions/approvals, MCP, plugins, LSP, and packaged installers are roadmap items.

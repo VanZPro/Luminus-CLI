@@ -15,6 +15,12 @@ pub enum Command {
     Models,
     /// `/discover` asks the active provider for its model ids.
     Discover,
+    /// Save the current conversation under a name.
+    Save(String),
+    /// List saved conversations.
+    Sessions,
+    /// Load a saved conversation by name.
+    Load(String),
     /// Spawn one independent child-agent request.
     Spawn(String),
 }
@@ -43,6 +49,9 @@ pub fn help_text() -> String {
         "  /model <role>      switch the active model role",
         "  /models            list configured roles and their models",
         "  /discover          discover models from the active provider",
+        "  /save <name>       save the current conversation",
+        "  /sessions          list saved conversations",
+        "  /load <name>       restore a saved conversation",
         "  /provider          list/show providers",
         "  /provider <name>   switch to the named provider",
         "  /spawn <prompt>    run a child agent on the active provider",
@@ -60,6 +69,13 @@ pub fn parse_command(input: &str) -> Result<Command, ParseCommandError> {
         "/provider" => Ok(Command::Provider(None)),
         "/models" => Ok(Command::Models),
         "/discover" => Ok(Command::Discover),
+        "/sessions" => Ok(Command::Sessions),
+        command if command.starts_with("/save ") => {
+            parse_named(command, "/save ").map(Command::Save)
+        }
+        command if command.starts_with("/load ") => {
+            parse_named(command, "/load ").map(Command::Load)
+        }
         command if command.starts_with("/spawn ") => {
             let prompt = command.strip_prefix("/spawn ").unwrap().trim();
             if prompt.is_empty() {
@@ -97,6 +113,17 @@ pub fn parse_command(input: &str) -> Result<Command, ParseCommandError> {
     }
 }
 
+fn parse_named(command: &str, prefix: &str) -> Result<String, ParseCommandError> {
+    let value = command.strip_prefix(prefix).unwrap_or_default().trim();
+    if value.is_empty() || value.contains('/') || value.contains('\\') {
+        Err(ParseCommandError {
+            command: command.to_owned(),
+        })
+    } else {
+        Ok(value.to_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Command, help_text, parse_command};
@@ -126,6 +153,21 @@ mod tests {
             Ok(Command::Spawn("inspect the architecture".into()))
         );
         assert!(help_text().contains("/spawn"));
+    }
+
+    #[test]
+    fn parses_session_commands_and_rejects_path_traversal() {
+        assert_eq!(
+            parse_command("/save morning"),
+            Ok(Command::Save("morning".into()))
+        );
+        assert_eq!(
+            parse_command("/load morning"),
+            Ok(Command::Load("morning".into()))
+        );
+        assert_eq!(parse_command("/sessions"), Ok(Command::Sessions));
+        assert!(parse_command("/save ../secret").is_err());
+        assert!(parse_command("/load ").is_err());
     }
 
     #[test]
