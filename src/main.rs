@@ -14,7 +14,7 @@ use luminus::{
     command::{self, Command, parse_command},
     event::ProviderEvent,
     model::{ModelCatalog, ModelRole, ModelSelection},
-    provider::{FakeProvider, Provider},
+    provider::{FakeProvider, ModelDiscovery, Provider},
     providers::openai_runtime::{OpenAiProvider, RuntimeProvider},
     tui::{self, Theme},
 };
@@ -257,6 +257,47 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                                     ),
                                 };
                                 app.start_request("command".into(), text);
+                            }
+                            Ok(Command::Discover) => {
+                                let request_id = "command".to_owned();
+                                let tx = provider_tx.clone();
+                                let p = provider.clone();
+                                tokio::spawn(async move {
+                                    match p.list_models().await {
+                                        Ok(models) => {
+                                            let text = if models.is_empty() {
+                                                "No models discovered.".to_owned()
+                                            } else {
+                                                format!(
+                                                    "Discovered models:\\n{}",
+                                                    models
+                                                        .iter()
+                                                        .map(|m| format!("  - {m}"))
+                                                        .collect::<Vec<_>>()
+                                                        .join("\\n")
+                                                )
+                                            };
+                                            let _ = tx.send(ProviderEvent::Started {
+                                                request_id: request_id.clone(),
+                                            });
+                                            let _ = tx.send(ProviderEvent::Delta {
+                                                request_id: request_id.clone(),
+                                                text,
+                                            });
+                                            let _ =
+                                                tx.send(ProviderEvent::Completed { request_id });
+                                        }
+                                        Err(error) => {
+                                            let _ = tx.send(ProviderEvent::Started {
+                                                request_id: request_id.clone(),
+                                            });
+                                            let _ = tx.send(ProviderEvent::Failed {
+                                                request_id,
+                                                error: format!("Model discovery failed: {error}"),
+                                            });
+                                        }
+                                    }
+                                });
                             }
                             Ok(Command::Spawn(child_prompt)) => {
                                 if app.active_agent_request_id().is_some() {

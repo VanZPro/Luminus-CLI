@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::event::ProviderEvent;
-use crate::provider::{ModelInfo, Provider, ProviderCapabilities};
+use crate::provider::{ModelDiscovery, ModelInfo, Provider, ProviderCapabilities};
 
 use super::openai_compatible::{
     ChatCompletionRequest, ChatMessage, ChatResult, ChatRole, OpenAiCompatibleConfig,
@@ -72,6 +72,13 @@ impl OpenAiProvider<ReqwestOpenAiTransport> {
             api_key: api_key.to_owned(),
             model,
         }))
+    }
+}
+
+impl<T: OpenAiTransport> ModelDiscovery for OpenAiProvider<T> {
+    type Error = OpenAiError;
+    async fn list_models(&self) -> Result<Vec<String>, Self::Error> {
+        self.inner.list_models().await.map(|list| list.ids)
     }
 }
 
@@ -180,6 +187,17 @@ impl RuntimeProvider {
     /// Whether the runtime is the real OpenAI-compatible provider.
     pub fn is_openai(&self) -> bool {
         matches!(self, Self::OpenAi(_))
+    }
+}
+
+impl ModelDiscovery for RuntimeProvider {
+    type Error = OpenAiError;
+
+    async fn list_models(&self) -> Result<Vec<String>, Self::Error> {
+        match self {
+            Self::Fake(_) => Ok(vec![crate::provider::ModelInfo::fake().id]),
+            Self::OpenAi(provider) => provider.list_models().await,
+        }
     }
 }
 

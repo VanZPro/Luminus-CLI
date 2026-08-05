@@ -32,6 +32,10 @@ impl OpenAiCompatibleEndpoint {
     pub fn chat_completions_url(&self) -> String {
         format!("{}/chat/completions", self.0)
     }
+
+    pub fn models_url(&self) -> String {
+        format!("{}/models", self.0)
+    }
 }
 impl fmt::Debug for OpenAiCompatibleEndpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -87,6 +91,70 @@ pub struct OpenAiResponse {
     pub status: u16,
     pub body: String,
 }
+
+/// Extracts model identifiers from the OpenAI `/models` response.
+///
+/// The parser intentionally accepts the common JSON shape without requiring a
+/// full schema: `{ "data": [{ "id": "model-name" }] }`.
+pub fn parse_model_ids(body: &str) -> Result<Vec<String>, OpenAiError> {
+    if body.contains(r#""error""#) {
+        return Err(parse_error(body));
+    }
+    let mut ids = Vec::new();
+    let mut cursor = body;
+    while let Some(position) = cursor.find(r#""id""#) {
+        let rest = &cursor[position + 4..];
+        let Some(colon) = rest.find(':') else { break };
+        let value = rest[colon + 1..].trim_start();
+        let Some(value) = value.strip_prefix('"') else {
+            cursor = &rest[colon + 1..];
+            continue;
+        };
+        let mut id = String::new();
+        let mut escaped = false;
+        for ch in value.chars() {
+            if escaped {
+                id.push(ch);
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                break;
+            } else {
+                id.push(ch);
+            }
+        }
+        if !id.is_empty() && !ids.contains(&id) {
+            ids.push(id);
+        }
+        cursor = &value[value.find('"').unwrap_or(value.len())..];
+        if cursor.is_empty() {
+            break;
+        }
+    }
+    if ids.is_empty() {
+        Err(OpenAiError::InvalidJson)
+    } else {
+        Ok(ids)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelList {
+    pub ids: Vec<String>,
+}
+
+impl ModelList {
+    pub fn from_response(response: &OpenAiResponse) -> Result<Self, OpenAiError> {
+        if response.status >= 400 {
+            return Err(parse_error(&response.body));
+        }
+        Ok(Self {
+            ids: parse_model_ids(&response.body)?,
+        })
+    }
+}
+
 pub trait OpenAiTransport: Send + Sync {
     fn send(
         &self,
@@ -167,6 +235,23 @@ impl<T: OpenAiTransport> OpenAiCompatibleProvider<T> {
     pub fn new(config: OpenAiCompatibleConfig, transport: T) -> Self {
         Self { config, transport }
     }
+
+    pub async fn list_models(&self) -> Result<ModelList, OpenAiError> {
+        let response = self
+            .transport
+            .send(OpenAiRequest {
+                method: "GET".into(),
+                url: self.config.endpoint.models_url(),
+                headers: vec![(
+                    "authorization".into(),
+                    format!("Bearer {}", self.config.api_key),
+                )],
+                body: String::new(),
+            })
+            .await?;
+        ModelList::from_response(&response)
+    }
+
     pub async fn chat(
         &self,
         mut request: ChatCompletionRequest,

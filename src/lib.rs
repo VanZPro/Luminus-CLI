@@ -72,6 +72,16 @@ pub mod provider {
         ) -> impl std::future::Future<Output = Vec<ProviderEvent>> + Send;
     }
 
+    /// Optional model-list discovery implemented by providers that can ask the
+    /// endpoint for its available models. Offline/fake providers return `None`
+    /// and callers fall back to their statically-known catalog.
+    pub trait ModelDiscovery {
+        type Error;
+        fn list_models(
+            &self,
+        ) -> impl std::future::Future<Output = Result<Vec<String>, Self::Error>> + Send;
+    }
+
     #[derive(Debug, Clone, Copy)]
     pub struct FakeProvider {
         delay: Duration,

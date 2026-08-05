@@ -13,6 +13,8 @@ pub enum Command {
     Provider(Option<String>),
     /// `/models` lists the configured roles and their models.
     Models,
+    /// `/discover` asks the active provider for its model ids.
+    Discover,
     /// Spawn one independent child-agent request.
     Spawn(String),
 }
@@ -40,6 +42,7 @@ pub fn help_text() -> String {
         "  /exit              quit",
         "  /model <role>      switch the active model role",
         "  /models            list configured roles and their models",
+        "  /discover          discover models from the active provider",
         "  /provider          list/show providers",
         "  /provider <name>   switch to the named provider",
         "  /spawn <prompt>    run a child agent on the active provider",
@@ -56,6 +59,7 @@ pub fn parse_command(input: &str) -> Result<Command, ParseCommandError> {
         "/exit" => Ok(Command::Exit),
         "/provider" => Ok(Command::Provider(None)),
         "/models" => Ok(Command::Models),
+        "/discover" => Ok(Command::Discover),
         command if command.starts_with("/spawn ") => {
             let prompt = command.strip_prefix("/spawn ").unwrap().trim();
             if prompt.is_empty() {
