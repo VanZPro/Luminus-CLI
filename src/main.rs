@@ -17,6 +17,7 @@ use luminus::{
     provider::{FakeProvider, ModelDiscovery, Provider},
     providers::openai_runtime::{OpenAiProvider, RuntimeProvider},
     session::{Session, default_root},
+    tools::{ToolRegistry, ToolRequest},
     tui::{self, Theme},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -62,6 +63,7 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
     let (provider_tx, mut provider_rx) = mpsc::unbounded_channel::<ProviderEvent>();
     let mut provider = RuntimeProvider::from_env_or_fake(Duration::from_millis(80));
     let mut model_catalog = ModelCatalog::new();
+    let tool_registry = ToolRegistry;
     for (role, model) in [
         (ModelRole::Default, "fake-model"),
         (ModelRole::Fast, "fake-fast"),
@@ -93,6 +95,49 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
 
         if event::poll(Duration::from_millis(40))? {
             let ev = event::read()?;
+
+            // Approval overlay intercepts keys while a tool is pending.
+            if app.ui_mode() == luminus::app::UiMode::Approval {
+                if let Event::Key(KeyEvent {
+                    code,
+                    kind: event::KeyEventKind::Press,
+                    ..
+                }) = ev
+                {
+                    match code {
+                        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                            if let Some(approval) = app.take_approval() {
+                                let message = match tool_registry.execute(&approval) {
+                                    Ok(output) => {
+                                        let text = format!(
+                                            "tool {} ({}): {}",
+                                            output.tool,
+                                            approval.spec.permission.label(),
+                                            output.output
+                                        );
+                                        app.append_tool_output(&output);
+                                        text
+                                    }
+                                    Err(error) => format!("tool error: {error}"),
+                                };
+                                app.start_request("command".into(), message);
+                                app.apply_provider_event(ProviderEvent::Completed {
+                                    request_id: "command".into(),
+                                });
+                            }
+                        }
+                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                            app.reject_approval();
+                            app.start_request("command".into(), "tool rejected".to_owned());
+                            app.apply_provider_event(ProviderEvent::Completed {
+                                request_id: "command".into(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                continue;
+            }
 
             // Model selector overlay intercepts keys while open.
             if app.ui_mode() == luminus::app::UiMode::ModelSelector {
@@ -299,6 +344,40 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                 });
+                            }
+                            Ok(Command::Tools) => {
+                                let text = tool_registry
+                                    .specs()
+                                    .iter()
+                                    .map(|spec| {
+                                        format!(
+                                            "{} [{}] - {}",
+                                            spec.name,
+                                            spec.permission.label(),
+                                            spec.description
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                app.start_request(
+                                    "command".into(),
+                                    format!("Available tools:\n{text}"),
+                                );
+                            }
+                            Ok(Command::Tool(name, args)) => {
+                                let request = ToolRequest { name, args };
+                                match tool_registry.prepare(request) {
+                                    Ok(approval) => app.show_approval(approval),
+                                    Err(error) => {
+                                        app.start_request(
+                                            "command".into(),
+                                            format!("tool error: {error}"),
+                                        );
+                                        app.apply_provider_event(ProviderEvent::Completed {
+                                            request_id: "command".into(),
+                                        });
+                                    }
+                                }
                             }
                             Ok(Command::Save(name)) => {
                                 let session = app.snapshot_session(name.clone());

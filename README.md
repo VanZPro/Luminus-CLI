@@ -14,6 +14,7 @@ Luminus is a terminal-native AI assistant written in Rust. It provides a respons
 - Role-based model selector (`Ctrl+M`) and `/model <role>`.
 - Provider model discovery through `/discover` and `GET /models`.
 - Persistent JSON sessions with `/save`, `/sessions`, and `/load`.
+- Permission-gated coding tools with `/tools`, `/tool`, and an approval overlay.
 - Atomic session writes with sanitized names and platform-aware data directories.
 - Request cancellation with `Esc` and `Ctrl+C`.
 - Child agents using `/spawn <prompt>` with separate lifecycle, output, and cancellation state.
@@ -144,6 +145,8 @@ luminus
 | `/save <name>` | Save the current conversation to disk |
 | `/sessions` | List saved conversations |
 | `/load <name>` | Restore a saved conversation |
+| `/tools` | List permission-gated coding tools |
+| `/tool <name> <args...>` | Request a tool invocation; approval is required |
 | `/provider` | Show the current provider |
 | `/provider fake` | Switch to offline fake provider |
 | `/provider openai` | Switch to configured OpenAI-compatible provider |
@@ -171,9 +174,11 @@ The current debugging pass verified:
 Known limitations:
 
 - Sessions are persisted as JSON under the platform data directory. Set `LUMINUS_DATA_DIR` to override it; `/clear` still removes only the current in-memory conversation.
+- `/tool` invocations always pause for explicit approval. `http_get` is listed for future network support but remains disabled in Phase 12.
 - The model catalog is currently in-memory and role-based.
 - Only one child agent may run at a time.
-- Tool execution, permissions/approvals, MCP, plugins, LSP, and packaged installers are roadmap items.
+- Tools other than `http_get` execute synchronously when approved; async and long-running tool streams are roadmap items.
+- Skills, MCP, plugins, LSP, and packaged installers are roadmap items.
 - `/discover` requires the active provider to implement the OpenAI-compatible `/models` endpoint.
 
 When reporting a bug, include the operating system, terminal emulator, Luminus commit, command being used, and sanitized error output. Do not include API keys.

@@ -55,14 +55,31 @@ Milestone 1 library and binary checks pass on Windows with stable Rust. The inte
 - [x] Reducer, command, and TUI integration tests
 - [x] Formatting, Clippy, workspace tests, and release build
 
+## Phase 10 completed
+
+- [x] Model discovery via `GET /models` for OpenAI-compatible providers
+- [x] `/discover` async command with provider-event routing
+- [x] Fake provider remains offline by default
+- [x] Formatting, Clippy, workspace tests, and release build
+
+## Phase 11 completed
+
+- [x] Atomic JSON session persistence (`/save`, `/sessions`, `/load`)
+- [x] Sanitized session names and platform-aware data directory
+- [x] `LUMINUS_DATA_DIR` override support
+- [x] Formatting, Clippy, workspace tests, and release build
+
+## Phase 12 completed
+
+- [x] Permission-gated tool registry (`read_file`, `write_file`, `list_dir`, `run_shell`, `http_get`)
+- [x] `/tools` listing and `/tool <name> <args...>` invocation
+- [x] Approval overlay (`UiMode::Approval`) with Y/Enter and N/Esc
+- [x] Network tool explicitly disabled in this phase
+- [x] Formatting, Clippy, workspace tests, and release build
+
 ## Next priorities
 
-- [ ] Provider model catalog/discovery endpoint
-- [ ] Sessions and context persistence
-- [ ] Coding tools, permissions, approvals, and diffs
-
-- Real providers and credentials
-- Coding tools, permissions, approvals, and diffs
-- Sessions and context persistence
-- Skills, MCP, plugins, agents, and missions
-- LSP and production installers
+- [ ] Real providers and credentials
+- [ ] Skill / MCP / plugin support
+- [ ] LSP and production installers
+- [ ] Advanced agent orchestration

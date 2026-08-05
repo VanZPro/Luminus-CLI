@@ -66,10 +66,49 @@ pub(crate) fn draw_with_composer(frame: &mut Frame<'_>, app: &App, theme: Theme,
     if app.ui_mode() == UiMode::ModelSelector {
         render_model_selector(frame, area, app, theme);
     }
+
+    if app.ui_mode() == UiMode::Approval {
+        render_approval_overlay(frame, area, app, theme);
+    }
 }
 
-/// Centered popup listing configured models; Up/Down to move, Enter to select,
-/// Esc to dismiss.
+fn render_approval_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
+    let Some(approval) = app.pending_approval.as_ref() else {
+        return;
+    };
+    let width = area.width.saturating_sub(6).clamp(34, 76);
+    let height = 8.min(area.height.saturating_sub(2)).max(5);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect::new(x, y, width, height);
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let args = if approval.request.args.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", approval.request.args.join(" "))
+    };
+    let lines = vec![
+        Line::from(format!("Tool: {}", approval.spec.name)),
+        Line::from(format!("Permission: {}", approval.spec.permission.label())),
+        Line::from(format!("Command: /tool {}{}", approval.spec.name, args)),
+        Line::from(""),
+        Line::from("Press Y/Enter to approve · N/Esc to reject"),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" APPROVAL REQUIRED ")
+                    .border_style(Style::default().fg(theme.accent))
+                    .style(Style::default().bg(theme.background)),
+            )
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
 fn render_model_selector(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     let items = &app.model_selector_items;
     let content_height = items.len() as u16 + 2; // borders

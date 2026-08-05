@@ -21,6 +21,10 @@ pub enum Command {
     Sessions,
     /// Load a saved conversation by name.
     Load(String),
+    /// /tools lists the available tools.
+    Tools,
+    /// /tool <name> <args...> runs an approved coding tool.
+    Tool(String, Vec<String>),
     /// Spawn one independent child-agent request.
     Spawn(String),
 }
@@ -52,6 +56,8 @@ pub fn help_text() -> String {
         "  /save <name>       save the current conversation",
         "  /sessions          list saved conversations",
         "  /load <name>       restore a saved conversation",
+        "  /tools             list available coding tools",
+        "  /tool <name> <args...> prepare a tool for approval",
         "  /provider          list/show providers",
         "  /provider <name>   switch to the named provider",
         "  /spawn <prompt>    run a child agent on the active provider",
@@ -70,12 +76,14 @@ pub fn parse_command(input: &str) -> Result<Command, ParseCommandError> {
         "/models" => Ok(Command::Models),
         "/discover" => Ok(Command::Discover),
         "/sessions" => Ok(Command::Sessions),
+        "/tools" => Ok(Command::Tools),
         command if command.starts_with("/save ") => {
             parse_named(command, "/save ").map(Command::Save)
         }
         command if command.starts_with("/load ") => {
             parse_named(command, "/load ").map(Command::Load)
         }
+        command if command.starts_with("/tool ") => parse_tool_command(command),
         command if command.starts_with("/spawn ") => {
             let prompt = command.strip_prefix("/spawn ").unwrap().trim();
             if prompt.is_empty() {
@@ -122,6 +130,23 @@ fn parse_named(command: &str, prefix: &str) -> Result<String, ParseCommandError>
     } else {
         Ok(value.to_owned())
     }
+}
+
+fn parse_tool_command(command: &str) -> Result<Command, ParseCommandError> {
+    let rest = command.strip_prefix("/tool ").unwrap_or_default().trim();
+    let mut parts = rest.split_whitespace();
+    let Some(name) = parts.next() else {
+        return Err(ParseCommandError {
+            command: command.to_owned(),
+        });
+    };
+    if name.contains('/') || name.contains('\\') {
+        return Err(ParseCommandError {
+            command: command.to_owned(),
+        });
+    }
+    let args = parts.map(ToOwned::to_owned).collect::<Vec<_>>();
+    Ok(Command::Tool(name.to_owned(), args))
 }
 
 #[cfg(test)]
@@ -171,6 +196,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_tool_commands_and_supports_zero_args() {
+        assert_eq!(parse_command("/tools"), Ok(Command::Tools));
+        assert_eq!(
+            parse_command("/tool read_file README.md"),
+            Ok(Command::Tool("read_file".into(), vec!["README.md".into()]))
+        );
+        assert_eq!(
+            parse_command("/tool list_dir ."),
+            Ok(Command::Tool("list_dir".into(), vec![".".into()]))
+        );
+        assert_eq!(
+            parse_command("/tool write_file a.txt hello"),
+            Ok(Command::Tool(
+                "write_file".into(),
+                vec!["a.txt".into(), "hello".into()]
+            ))
+        );
+        assert!(parse_command("/tool ").is_err());
+        assert!(parse_command("/tool").is_err());
+    }
+
+    #[test]
     fn help_text_mentions_every_command() {
         let text = help_text();
         for command in [
@@ -180,7 +227,14 @@ mod tests {
             "/exit",
             "/model",
             "/models",
+            "/discover",
+            "/save",
+            "/sessions",
+            "/load",
+            "/tools",
+            "/tool",
             "/provider",
+            "/spawn",
         ] {
             assert!(text.contains(command), "help text missing {command}");
         }

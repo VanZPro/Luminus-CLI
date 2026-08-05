@@ -3,6 +3,7 @@ use crate::context::ContextBudget;
 use crate::event::ProviderEvent;
 use crate::session::{SavedMessage, Session};
 use crate::tool_activity::ToolActivity;
+use crate::tools::{ApprovalRequest, ToolOutput};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +68,7 @@ pub enum UiMode {
     #[default]
     Normal,
     ModelSelector,
+    Approval,
 }
 
 /// Pure application state: a reducer over user input and provider events.
@@ -81,9 +83,37 @@ pub struct App {
     pub model_selector_items: Vec<String>,
     /// Tracked spawned agents, newest last.
     pub agent_runs: Vec<AgentRun>,
+    /// Pending coding tool that requires operator approval.
+    pub pending_approval: Option<ApprovalRequest>,
 }
 
 impl App {
+    /// Show the approval overlay for a tool invocation.
+    pub fn show_approval(&mut self, request: ApprovalRequest) {
+        self.pending_approval = Some(request);
+        self.ui_mode = UiMode::Approval;
+    }
+
+    /// Accept the pending tool approval and clear the overlay.
+    pub fn take_approval(&mut self) -> Option<ApprovalRequest> {
+        self.ui_mode = UiMode::Normal;
+        self.pending_approval.take()
+    }
+
+    /// Reject the pending tool approval and clear the overlay.
+    pub fn reject_approval(&mut self) {
+        self.ui_mode = UiMode::Normal;
+        self.pending_approval = None;
+    }
+
+    /// Append a tool output message to the conversation.
+    pub fn append_tool_output(&mut self, output: &ToolOutput) {
+        self.messages.push(Message {
+            role: Role::Assistant,
+            content: format!("tool {}:\n{}", output.tool, output.output),
+        });
+    }
+
     pub fn snapshot_session(&self, name: impl Into<String>) -> Session {
         Session::new(name, self.messages.iter().map(SavedMessage::from).collect())
     }
@@ -356,11 +386,49 @@ mod tests {
     }
 
     #[test]
+    fn approval_can_be_accepted_or_rejected() {
+        use crate::app::UiMode;
+        use crate::tools::{ApprovalRequest, Permission, ToolRequest, ToolSpec};
+        let approval = ApprovalRequest {
+            request: ToolRequest {
+                name: "read_file".into(),
+                args: vec!["Cargo.toml".into()],
+            },
+            spec: ToolSpec {
+                name: "read_file",
+                description: "read",
+                permission: Permission::ReadOnly,
+            },
+        };
+        let mut app = App::default();
+        app.show_approval(approval.clone());
+        assert_eq!(app.ui_mode(), UiMode::Approval);
+        assert_eq!(app.take_approval(), Some(approval));
+        assert_eq!(app.ui_mode(), UiMode::Normal);
+
+        app.show_approval(ApprovalRequest {
+            request: ToolRequest {
+                name: "run_shell".into(),
+                args: vec!["printf no".into()],
+            },
+            spec: ToolSpec {
+                name: "run_shell",
+                description: "execute",
+                permission: Permission::Execute,
+            },
+        });
+        app.reject_approval();
+        assert_eq!(app.ui_mode(), UiMode::Normal);
+        assert!(app.pending_approval.is_none());
+    }
+
+    #[test]
     fn clear_resets_state() {
         let mut app = App::default();
         app.start_request("r1".into(), "hello".into());
         app.clear();
 
         assert!(app.messages.is_empty());
+        assert!(app.pending_approval.is_none());
     }
 }
