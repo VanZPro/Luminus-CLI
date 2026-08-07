@@ -317,11 +317,7 @@ fn render_status(
         .map(|m| m.content.split_whitespace().count())
         .sum::<usize>();
     let model = "default";
-    let mode = if app.messages.iter().any(|m| m.role == Role::Assistant) {
-        "chat"
-    } else {
-        "ready"
-    };
+    let mode = app.agent_mode.label();
     let safety = "safe";
     let hint = if compact {
         "Enter: send  Ctrl+C: quit"

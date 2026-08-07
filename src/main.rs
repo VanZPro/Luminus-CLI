@@ -330,17 +330,33 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                         "/env",
                         "/mcp",
                     ];
-                    let query = composer.to_ascii_lowercase();
-                    let matches: Vec<&str> = COMMANDS
+                    let mut matches = COMMANDS
                         .iter()
+                        .filter(|c| c.starts_with(composer.as_str()))
                         .copied()
-                        .filter(|c| c.starts_with(&query))
-                        .collect();
-                    if let Some(selected) =
-                        matches.get(selected_index.min(matches.len().saturating_sub(1)))
-                    {
-                        composer = selected.to_string();
+                        .collect::<Vec<_>>();
+                    if matches.is_empty() {
+                        matches = COMMANDS.to_vec();
                     }
+                    if let Some(selected) = matches.get(selected_index) {
+                        composer = (*selected).to_string();
+                        app.reset_slash_autocomplete();
+                    }
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Tab,
+                    kind: event::KeyEventKind::Press,
+                    ..
+                }) => {
+                    // Normal tab: cycle agent mode
+                    let new_mode = app.cycle_agent_mode();
+                    app.start_command(
+                        "command",
+                        format!("Agent mode switched to: {}", new_mode.label()),
+                    );
+                    app.apply_provider_event(ProviderEvent::Completed {
+                        request_id: "command".into(),
+                    });
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Backspace,

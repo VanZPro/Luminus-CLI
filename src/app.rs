@@ -124,6 +124,31 @@ struct ActiveRequest {
     message_index: Option<usize>,
 }
 
+/// Core agent modes defining the system prompt and behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentMode {
+    #[default]
+    Build,
+    Plan,
+    Review,
+    Debug,
+    Explore,
+    Orchestrate,
+}
+
+impl AgentMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Build => "build",
+            Self::Plan => "plan",
+            Self::Review => "review",
+            Self::Debug => "debug",
+            Self::Explore => "explore",
+            Self::Orchestrate => "orchestrate",
+        }
+    }
+}
+
 /// Application UI mode: normal chat or a modal overlay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UiMode {
@@ -166,6 +191,8 @@ pub struct App {
     skill_registry: SkillRegistry,
     /// Selected index in slash command autocomplete popup.
     pub slash_autocomplete_index: usize,
+    /// Active agent mode (Build, Plan, Review, Debug, Explore, Orchestrate).
+    pub agent_mode: AgentMode,
 }
 
 impl App {
@@ -176,6 +203,19 @@ impl App {
     pub fn move_slash_autocomplete(&mut self, delta: isize) {
         let next = self.slash_autocomplete_index as isize + delta;
         self.slash_autocomplete_index = next.max(0) as usize;
+    }
+
+    /// Cycle to the next agent mode (Build -> Plan -> Review -> Debug -> Explore -> Orchestrate -> Build).
+    pub fn cycle_agent_mode(&mut self) -> AgentMode {
+        self.agent_mode = match self.agent_mode {
+            AgentMode::Build => AgentMode::Plan,
+            AgentMode::Plan => AgentMode::Review,
+            AgentMode::Review => AgentMode::Debug,
+            AgentMode::Debug => AgentMode::Explore,
+            AgentMode::Explore => AgentMode::Orchestrate,
+            AgentMode::Orchestrate => AgentMode::Build,
+        };
+        self.agent_mode
     }
 
     /// Current session policy for `tool`, if any.
