@@ -11,11 +11,12 @@ Terminal-native AI coding agent written in Rust. Ratatui TUI, streaming chat, pr
 - **`/provider`** — show or switch (`fake` / `openai`)
 - **`/discover`** — list models from the active provider’s `GET /models`
 - **Models** — role map (`default` / `fast` / `deep`), `/model`, `/models`, `Ctrl+M` selector
-- **Sessions** — JSON under the platform data dir; `/save`, `/sessions`, `/load` (atomic write, sanitized names)
-- **Tools** — `/tools`, `/tool <name> …` with approval overlay; specs: `read_file`, `write_file`, `list_dir`, `run_shell`, `file_meta`/`file_metadata`, `glob`, `grep`, `edit_file`, `http_get` (disabled)
+- **Sessions** — JSON under the platform data dir; `/save`, `/sessions`, `/load` (atomic write, sanitized names); event log for tools/approvals
+- **Tools** — `/tools`, `/tool <name> …` with approval overlay; specs: `read_file`, `write_file`, `list_dir`, `run_shell`, `file_meta`/`file_metadata`, `glob`, `grep`, `edit_file` (optional content-hash + unified diff output), `http_get` (disabled)
 - **Approval choices** — `Y`/Enter once, `A` session allow, `P` project allow (persist), `N`/Esc reject, `D` session deny, `X` project deny (persist)
 - **Security basics** — explicit approval; path canonicalization + project-root check for relative paths; sensitive-path deny (`.env`, keys, `.ssh`/`.aws`, …); shell denylist for a few destructive patterns; project policy file `.luminus/tool_policy.json`; API keys redacted in debug paths
 - **Shell** — timeout (default 30s, `LUMINUS_SHELL_TIMEOUT_SECS`); background worker + `Esc`/`Ctrl+C` cancel via `CancellationToken`
+- **Bounded output** — tool transcripts capped; truncated full text saved under `<data_root>/artifacts/` with `artifact_id`
 - **Agents** — `/spawn <prompt>` one isolated child request; single-child policy; `Esc` / `Ctrl+C` cancellation; context-window estimate
 
 ## Limitations (honest)
@@ -25,7 +26,8 @@ Terminal-native AI coding agent written in Rust. Ratatui TUI, streaming chat, pr
 - **Absolute paths** can target outside the project after approval (relative paths are contained)
 - **No full MCP / skills runtime / LSP / plugins** in the binary yet (a `skills/` tree may exist in the repo as reference material; the agent does not load it as a product feature)
 - **One child agent / one tool** at a time; no full multi-tool parallel orchestration yet
-- **No disk artifact store** for truncated tool output (full text kept in-memory only)
+- **No full pre-accept diff UI** (`/diff`/`/undo`) yet — `edit_file` still prints a post-apply unified diff + content fingerprint
+- **Content hash** is a non-crypto `dh64:` DefaultHasher fingerprint (stale-edit guard), not SHA-256
 - **Model catalog** is in-memory / role-based
 - **No claim** of full Intruksi / production acceptance criteria
 

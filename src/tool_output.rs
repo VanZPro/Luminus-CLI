@@ -6,15 +6,16 @@
 //! how much was omitted) and optional typed access to a persisted artifact id
 //! and to the full untruncated output.
 //!
-//! Filesystem artifact persistence is intentionally out of scope here: the
-//! artifact id is a typed, opaque field that starts `None` and is only set by a
-//! later phase that writes artifacts to disk.
+//! Disk persistence of full payloads lives in [`crate::artifact_store`]. After
+//! truncation, call [`BoundedOutput::persist_if_truncated`] (alias
+//! [`BoundedOutput::persist_full`]) to write the full text, set `artifact_id`,
+//! and drop the in-memory `full_output` copy.
 
 /// Opaque, typed identifier for a persisted output artifact.
 ///
-/// Persistence is not implemented in this phase; the wrapper exists so callers
-/// can hold a concrete artifact id without special-casing an unwrapped
-/// `String`.
+/// Produced by [`crate::artifact_store::ArtifactStore::save`] and stored on
+/// [`BoundedOutput::artifact_id`] after a successful
+/// [`BoundedOutput::persist_if_truncated`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ArtifactId(String);
 
@@ -27,6 +28,12 @@ impl ArtifactId {
     /// Borrow the underlying id string.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl std::fmt::Display for ArtifactId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -139,10 +146,48 @@ impl BoundedOutput {
         self
     }
 
+    /// If this output was truncated and still holds `full_output`, write it to
+    /// `store`, set [`Self::artifact_id`], and **drop** `full_output` from memory.
+    ///
+    /// # Memory policy
+    ///
+    /// After a successful disk write the in-memory full payload is cleared so
+    /// the disk path is the sole source of truth for the complete text. Callers
+    /// that need the full body again should use
+    /// [`crate::artifact_store::ArtifactStore::load`].
+    ///
+    /// No-op (returns `Ok(())`) when not truncated, already persisted, or when
+    /// `full_output` is missing.
+    pub fn persist_if_truncated(
+        &mut self,
+        store: &crate::artifact_store::ArtifactStore,
+    ) -> std::io::Result<()> {
+        if !self.truncated || self.artifact_id.is_some() {
+            return Ok(());
+        }
+        let Some(full) = self.full_output.as_ref() else {
+            return Ok(());
+        };
+        let id = store.save(full)?;
+        self.artifact_id = Some(id);
+        // Drop the in-memory copy after a successful persist to prove the disk
+        // path and free RAM for large tool outputs.
+        self.full_output = None;
+        Ok(())
+    }
+
+    /// Alias for [`Self::persist_if_truncated`] — persist full truncated payload.
+    pub fn persist_full(
+        &mut self,
+        store: &crate::artifact_store::ArtifactStore,
+    ) -> std::io::Result<()> {
+        self.persist_if_truncated(store)
+    }
+
     /// Build a bounded output from a raw string, applying the given [`Bounds`].
     ///
     /// The preview is valid UTF-8, never exceeds `max_bytes` or `max_lines`,
-    /// and is cut on a UTF-8 char boundary. `full_output` is set when the
+    /// and is cut on a UTF-8 char boundary. `full_output` is set when truncated.
     pub fn truncate(input: &str, bounds: Bounds) -> Self {
         let total_bytes = input.len();
         let total_lines = input.lines().count();

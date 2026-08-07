@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod app;
+pub mod artifact_store;
 pub mod command;
 pub mod context;
 pub mod event;

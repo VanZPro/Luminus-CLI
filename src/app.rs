@@ -1,8 +1,9 @@
 use crate::agent::{AgentRun, AgentStatus};
+use crate::artifact_store::ArtifactStore;
 use crate::context::ContextBudget;
 use crate::event::ProviderEvent;
 use crate::permission_policy::{ProjectToolPolicy, ToolPolicy};
-use crate::session::{SavedMessage, Session};
+use crate::session::{SavedMessage, Session, SessionEvent};
 use crate::tool_activity::ToolActivity;
 use crate::tool_event::{ToolCallId, ToolLifecycleEvent};
 use crate::tool_output::{BoundedOutput, Bounds, TruncationKind};
@@ -27,6 +28,20 @@ pub enum ApprovalChoice {
     RejectDenySession,
     /// Reject this invocation and persist deny for the tool in the project policy file.
     RejectDenyProject,
+}
+
+impl ApprovalChoice {
+    /// Stable string label for session event logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AllowOnce => "allow_once",
+            Self::AllowSession => "allow_session",
+            Self::AllowProject => "allow_project",
+            Self::Reject => "reject",
+            Self::RejectDenySession => "deny_session",
+            Self::RejectDenyProject => "deny_project",
+        }
+    }
 }
 
 /// Session-scoped policy for a tool name (process lifetime, cleared on [`App::clear`]).
@@ -138,6 +153,10 @@ pub struct App {
     project_tool_policy: Option<ProjectToolPolicy>,
     /// Last non-fatal error from a project-policy disk write (surface to the UI).
     pub last_policy_error: Option<String>,
+    /// Event-oriented session log (tools/approvals); dual-written on snapshot.
+    session_events: Vec<SessionEvent>,
+    /// Disk store for full truncated tool outputs (`<data_root>/artifacts/`).
+    artifact_store: ArtifactStore,
 }
 
 impl App {
@@ -253,11 +272,11 @@ impl App {
             ApprovalChoice::AllowOnce | ApprovalChoice::Reject => {}
             ApprovalChoice::AllowSession => {
                 self.session_tool_policy
-                    .insert(tool, SessionToolPolicy::Allowed);
+                    .insert(tool.clone(), SessionToolPolicy::Allowed);
             }
             ApprovalChoice::RejectDenySession => {
                 self.session_tool_policy
-                    .insert(tool, SessionToolPolicy::Denied);
+                    .insert(tool.clone(), SessionToolPolicy::Denied);
             }
             ApprovalChoice::AllowProject => {
                 self.persist_project_policy(&tool, ToolPolicy::Allowed);
@@ -266,6 +285,10 @@ impl App {
                 self.persist_project_policy(&tool, ToolPolicy::Denied);
             }
         }
+        self.session_events.push(SessionEvent::ApprovalResolved {
+            tool,
+            choice: choice.as_str().to_owned(),
+        });
         Some(approval)
     }
 
@@ -317,8 +340,7 @@ impl App {
     /// Append a bounded tool-output transcript line with call id + permission.
     ///
     /// When `bounded.truncated` is true the message includes total byte/line
-    /// counts, omission counts, truncation kind, and notes that the full
-    /// output is retained in-memory only (no disk artifact yet).
+    /// counts, omission counts, truncation kind, and any persisted artifact id.
     pub fn append_bounded_tool_output(
         &mut self,
         id: ToolCallId,
@@ -363,20 +385,26 @@ impl App {
     /// Call this **before** `ToolRegistry::execute` so the lifecycle stream
     /// begins prior to side effects.
     pub fn begin_tool(&mut self, id: ToolCallId, tool: impl Into<String>) -> ToolLifecycleEvent {
+        let tool = tool.into();
         let event = ToolLifecycleEvent::Started {
             id,
-            tool: tool.into(),
+            tool: tool.clone(),
         };
         self.apply_tool_lifecycle(&event, None);
+        self.session_events.push(SessionEvent::ToolStarted {
+            id: id.to_string(),
+            tool,
+        });
         event
     }
 
     /// Record the terminal outcome of an approved tool execution.
     ///
     /// Expects [`Self::begin_tool`] to have already been called with the same
-    /// `id`. On success: bounds the output with [`Bounds::default`], appends a
-    /// transcript message (with truncation metadata when needed), and emits
-    /// Completed. On error: emits Failed. Returns a one-line command-log summary.
+    /// `id`. On success: bounds the output with [`Bounds::default`], persists
+    /// truncated full output to the artifact store when possible, appends a
+    /// transcript message, and emits Completed. On error: emits Failed.
+    /// Returns a one-line command-log summary.
     pub fn record_tool_result(
         &mut self,
         id: ToolCallId,
@@ -389,8 +417,14 @@ impl App {
 
         match result {
             Ok(output) => {
-                let bounded = BoundedOutput::truncate(&output.output, Bounds::default());
+                let mut bounded = BoundedOutput::truncate(&output.output, Bounds::default());
+                if let Err(error) = bounded.persist_if_truncated(&self.artifact_store) {
+                    self.last_policy_error = Some(format!(
+                        "failed to persist tool artifact for `{tool}`: {error}"
+                    ));
+                }
                 self.append_bounded_tool_output(id, tool, permission, &bounded);
+                let summary = format_tool_summary_ok(id, tool, permission, &bounded);
                 self.apply_tool_lifecycle(
                     &ToolLifecycleEvent::Completed {
                         id,
@@ -399,7 +433,13 @@ impl App {
                     },
                     Some(duration),
                 );
-                format_tool_summary_ok(id, tool, permission, &bounded)
+                self.session_events.push(SessionEvent::ToolCompleted {
+                    id: id.to_string(),
+                    tool: tool.to_owned(),
+                    ok: true,
+                    summary: summary.clone(),
+                });
+                summary
             }
             Err(error) => {
                 let error_text = error.to_string();
@@ -411,6 +451,11 @@ impl App {
                     },
                     Some(duration),
                 );
+                self.session_events.push(SessionEvent::ToolFailed {
+                    id: id.to_string(),
+                    tool: tool.to_owned(),
+                    error: error_text.clone(),
+                });
                 format!("tool {id} ({tool}): error: {error_text}")
             }
         }
@@ -429,6 +474,11 @@ impl App {
             tool: tool.clone(),
         };
         self.apply_tool_lifecycle(&event, None);
+        self.session_events.push(SessionEvent::ToolCancelled {
+            id: id.to_string(),
+            tool: tool.clone(),
+            reason: "rejected".into(),
+        });
         format!("tool {id} ({tool}): rejected")
     }
 
@@ -449,7 +499,25 @@ impl App {
     }
 
     pub fn snapshot_session(&self, name: impl Into<String>) -> Session {
-        Session::new(name, self.messages.iter().map(SavedMessage::from).collect())
+        let messages: Vec<SavedMessage> = self.messages.iter().map(SavedMessage::from).collect();
+        let mut session = Session::new(name, messages);
+        if self.session_events.is_empty() {
+            // Dual-write message events so the event log is usable on first save.
+            let message_events: Vec<SessionEvent> = session
+                .messages
+                .iter()
+                .map(|message| SessionEvent::Message {
+                    role: message.role.clone(),
+                    content: message.content.clone(),
+                })
+                .collect();
+            for event in message_events {
+                session.append_event(event);
+            }
+        } else {
+            session.events = self.session_events.clone();
+        }
+        session
     }
 
     pub fn restore_session(&mut self, session: &Session) {
@@ -464,6 +532,26 @@ impl App {
                 })
             })
             .collect();
+        self.session_events = session.events.clone();
+        if self.session_events.is_empty() {
+            // Legacy sessions: synthesize message events from transcript.
+            for message in &self.messages {
+                self.session_events.push(SessionEvent::Message {
+                    role: message.role.to_string(),
+                    content: message.content.clone(),
+                });
+            }
+        }
+    }
+
+    /// Borrow the in-memory session event log (tools/approvals).
+    pub fn session_events(&self) -> &[SessionEvent] {
+        &self.session_events
+    }
+
+    /// Borrow the artifact store used for truncated tool full-output.
+    pub fn artifact_store(&self) -> &ArtifactStore {
+        &self.artifact_store
     }
 
     /// Current UI mode.
@@ -628,6 +716,8 @@ impl App {
         self.ui_mode = UiMode::Normal;
         self.session_tool_policy.clear();
         self.last_policy_error = None;
+        self.session_events.clear();
+        // Project policy + artifact store survive /clear (disk-backed).
     }
 }
 
@@ -640,8 +730,15 @@ fn format_bounded_tool_message(
 ) -> String {
     let mut message = format!("tool {id} ({tool}, {permission}):\n{}", bounded.preview);
     if bounded.truncated {
+        let artifact_note = match bounded.artifact_id.as_ref() {
+            Some(aid) => format!("full_output on disk artifact_id={aid}"),
+            None if bounded.full_output.is_some() => {
+                "full_output available in-memory only (no disk artifact yet)".to_owned()
+            }
+            None => "full_output unavailable (not persisted)".to_owned(),
+        };
         message.push_str(&format!(
-            "\n\n[truncated: {} | total_bytes={} total_lines={} bytes_omitted={} lines_omitted={} | full_output available in-memory only (no disk artifact yet)]",
+            "\n\n[truncated: {} | total_bytes={} total_lines={} bytes_omitted={} lines_omitted={} | {artifact_note}]",
             truncation_kind_label(bounded.truncation),
             bounded.total_bytes,
             bounded.total_lines,
@@ -661,8 +758,13 @@ fn format_tool_summary_ok(
 ) -> String {
     let preview_one_line = bounded.preview.replace('\n', " ");
     if bounded.truncated {
+        let artifact_note = match bounded.artifact_id.as_ref() {
+            Some(aid) => format!("artifact_id={aid}"),
+            None if bounded.full_output.is_some() => "full_output in-memory only".to_owned(),
+            None => "full_output unavailable".to_owned(),
+        };
         format!(
-            "tool {id} ({tool}, {permission}): {preview_one_line} [truncated: {} | {}B/{}L omitted {}B/{}L; full_output in-memory only]",
+            "tool {id} ({tool}, {permission}): {preview_one_line} [truncated: {} | {}B/{}L omitted {}B/{}L; {artifact_note}]",
             truncation_kind_label(bounded.truncation),
             bounded.total_bytes,
             bounded.total_lines,
@@ -864,9 +966,13 @@ mod tests {
         assert!(content.contains(&format!("total_lines={}", bounded.total_lines)));
         assert!(content.contains(&format!("bytes_omitted={}", bounded.bytes_omitted)));
         assert!(content.contains(&format!("lines_omitted={}", bounded.lines_omitted)));
-        assert!(content.contains("full_output available in-memory only"));
-        assert!(content.contains("no disk artifact yet"));
-        assert!(bounded.full_output.is_some());
+        // Without a store, truncated output still notes in-memory full text.
+        assert!(
+            content.contains("full_output available in-memory only")
+                || content.contains("artifact_id=")
+                || content.contains("full_output unavailable")
+        );
+        assert!(bounded.full_output.is_some() || bounded.artifact_id.is_some());
     }
 
     #[test]

@@ -7,7 +7,7 @@
 use std::{
     collections::hash_map::DefaultHasher,
     fs,
-    hash::{Hash, Hasher},
+    hash::Hasher,
     io::{self, Read},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
@@ -185,7 +185,7 @@ pub const TOOL_SPECS: [ToolSpec; 10] = [
     },
     ToolSpec {
         name: "edit_file",
-        description: "replace an exact unique string in a file",
+        description: "replace an exact unique string in a file; optional 4th arg expected_hash (dh64:…) rejects stale content; reports before/after hash + unified diff",
         permission: Permission::Write,
     },
     ToolSpec {
@@ -275,7 +275,15 @@ impl ToolRegistry {
                     .unwrap_or_else(|| metadata.cwd.clone());
                 grep_files(pattern, &search_root, &metadata.cwd)?
             }
-            "edit_file" => edit_file(&metadata.affected_paths[0], &args[1], &args[2])?,
+            "edit_file" => {
+                let expected_hash = args.get(3).map(String::as_str);
+                edit_file_with_hash(
+                    &metadata.affected_paths[0],
+                    &args[1],
+                    &args[2],
+                    expected_hash,
+                )?
+            }
             "run_shell" => run_shell_cancellable(&args[0], cancel)?,
             "http_get" => return Err(ToolError::NetworkDisabled),
             _ => return Err(ToolError::UnknownTool(approval.request.name.clone())),
@@ -797,20 +805,132 @@ fn is_binary_ish(bytes: &[u8]) -> bool {
     nontext * 100 / sample.len() > 10
 }
 
-fn content_hash(content: &str) -> u64 {
+/// Content hash of raw file bytes.
+///
+/// Format: `dh64:<16 lowercase hex digits>` — non-cryptographic fingerprint
+/// from [`std::collections::hash_map::DefaultHasher`] (SipHash-1-3) over
+/// `len` then the full byte slice. Suitable for stale-edit detection within a
+/// session, not for integrity against adversaries.
+pub fn content_hash_of(bytes: &[u8]) -> String {
     let mut hasher = DefaultHasher::new();
-    content.hash(&mut hasher);
-    hasher.finish()
+    hasher.write_usize(bytes.len());
+    hasher.write(bytes);
+    format!("dh64:{:016x}", hasher.finish())
 }
 
-/// Replace exactly one occurrence of `old` with `new`. Refuses missing or
-/// ambiguous matches. Re-reads before write and rejects stale content via hash.
-fn edit_file(path: &Path, old: &str, new: &str) -> Result<String, ToolError> {
+/// Dominant newline style in `text`: CRLF if any `\r\n` is present, else LF.
+fn detect_newline_style(text: &str) -> &'static str {
+    if text.contains("\r\n") { "\r\n" } else { "\n" }
+}
+
+/// Rewrite bare/mixed newlines in `s` to match `nl` (`"\n"` or `"\r\n"`).
+fn normalize_newlines_to(s: &str, nl: &str) -> String {
+    // First collapse CRLF → LF so we never double-convert, then expand.
+    let lf_only = s.replace("\r\n", "\n").replace('\r', "\n");
+    if nl == "\r\n" {
+        lf_only.replace('\n', "\r\n")
+    } else {
+        lf_only
+    }
+}
+
+/// Build a simple unified-diff hunk for the unique `old` → `new` replacement
+/// inside `before`. Line-based; not a full Myers diff — enough to inspect the
+/// change before/after acceptance.
+fn unified_diff_for_replace(path_display: &str, before: &str, old: &str, new: &str) -> String {
+    let pos = before.find(old).unwrap_or(0);
+    let start_line = before[..pos].matches('\n').count() + 1;
+
+    // Split on '\n' but keep visual lines; strip trailing '\r' so CRLF files
+    // still show clean unified-diff lines.
+    let split_lines = |s: &str| -> Vec<String> {
+        if s.is_empty() {
+            return Vec::new();
+        }
+        s.split('\n')
+            .map(|line| line.trim_end_matches('\r').to_string())
+            .collect()
+    };
+    let old_lines = split_lines(old);
+    let new_lines = split_lines(new);
+    // split produces a trailing empty element when s ends with '\n'; drop it
+    // for hunk counts so "a\n" is one line, matching typical diff tools.
+    let trim_trailing_empty = |lines: Vec<String>| -> Vec<String> {
+        let mut lines = lines;
+        if lines.last().is_some_and(|l| l.is_empty()) && lines.len() > 1 {
+            lines.pop();
+        }
+        lines
+    };
+    let old_lines = trim_trailing_empty(old_lines);
+    let new_lines = trim_trailing_empty(new_lines);
+    let old_n = old_lines.len().max(1);
+    let new_n = new_lines.len().max(1);
+
+    let mut out = String::new();
+    out.push_str(&format!("--- a/{path_display}\n"));
+    out.push_str(&format!("+++ b/{path_display}\n"));
+    out.push_str(&format!(
+        "@@ -{start_line},{old_n} +{start_line},{new_n} @@\n"
+    ));
+    if old_lines.is_empty() {
+        out.push_str("-\n");
+    } else {
+        for line in &old_lines {
+            out.push('-');
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if new_lines.is_empty() {
+        out.push_str("+\n");
+    } else {
+        for line in &new_lines {
+            out.push('+');
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Replace exactly one occurrence of `old` with `new`.
+///
+/// When `expected_hash` is `Some`, the on-disk content hash must match or the
+/// edit is rejected as stale (`ToolError::EditFailed`). When `None`, behaves
+/// like a plain unique replace but still reports hashes.
+///
+/// Preserves the file's dominant line-ending style (CRLF vs LF) by normalizing
+/// the replacement text and writing raw bytes. Output includes `before_hash`,
+/// `after_hash`, a line-ending note, and a unified diff of the hunk.
+pub fn edit_file_with_hash(
+    path: &Path,
+    old: &str,
+    new: &str,
+    expected_hash: Option<&str>,
+) -> Result<String, ToolError> {
     if old.is_empty() {
         return Err(ToolError::EditFailed("old_string must not be empty".into()));
     }
-    let original = fs::read_to_string(path).map_err(|e| ToolError::Io(e.to_string()))?;
-    let hash = content_hash(&original);
+
+    let raw = fs::read(path).map_err(|e| ToolError::Io(e.to_string()))?;
+    if raw.contains(&0) {
+        return Err(ToolError::EditFailed(
+            "refusing to edit binary file (NUL byte present)".into(),
+        ));
+    }
+    let original = String::from_utf8(raw)
+        .map_err(|e| ToolError::EditFailed(format!("file is not valid UTF-8: {e}")))?;
+    let before_hash = content_hash_of(original.as_bytes());
+
+    if let Some(expected) = expected_hash
+        && expected != before_hash
+    {
+        return Err(ToolError::EditFailed(format!(
+            "stale content hash: expected {expected} got {before_hash}"
+        )));
+    }
+
     let occurrences = original.matches(old).count();
     match occurrences {
         0 => {
@@ -823,27 +943,42 @@ fn edit_file(path: &Path, old: &str, new: &str) -> Result<String, ToolError> {
             )));
         }
     }
-    let updated = original.replacen(old, new, 1);
 
-    // Content-hash safety: refuse if the file changed under us.
-    let recheck = fs::read_to_string(path).map_err(|e| ToolError::Io(e.to_string()))?;
-    if content_hash(&recheck) != hash {
-        return Err(ToolError::EditFailed(
-            "file changed since read (stale edit rejected)".into(),
-        ));
+    let nl = detect_newline_style(&original);
+    // Keep `old` exact (must match on-disk bytes). Normalize only `new` so
+    // inserted text follows the file's line-ending convention.
+    let new_normalized = normalize_newlines_to(new, nl);
+    let updated = original.replacen(old, &new_normalized, 1);
+
+    // TOCTOU: refuse if the file changed under us between read and write.
+    let recheck_raw = fs::read(path).map_err(|e| ToolError::Io(e.to_string()))?;
+    let recheck_hash = content_hash_of(&recheck_raw);
+    if recheck_hash != before_hash {
+        return Err(ToolError::EditFailed(format!(
+            "file changed since read (stale edit rejected): was {before_hash} now {recheck_hash}"
+        )));
     }
-    if recheck != original {
+    if recheck_raw.as_slice() != original.as_bytes() {
         return Err(ToolError::EditFailed(
             "file content mismatch before write".into(),
         ));
     }
 
-    fs::write(path, &updated).map_err(|e| ToolError::Io(e.to_string()))?;
+    fs::write(path, updated.as_bytes()).map_err(|e| ToolError::Io(e.to_string()))?;
+    let after_hash = content_hash_of(updated.as_bytes());
+
+    let path_display = path.display().to_string();
+    let ending_note = if nl == "\r\n" {
+        "line_endings: CRLF (preserved)"
+    } else {
+        "line_endings: LF"
+    };
+    let diff = unified_diff_for_replace(&path_display, &original, old, &new_normalized);
+
     Ok(format!(
-        "edited {} (replaced {} bytes with {} bytes)",
-        path.display(),
+        "edited {path_display}\nbefore_hash: {before_hash}\nafter_hash: {after_hash}\n{ending_note}\nreplaced {} bytes with {} bytes\n{diff}",
         old.len(),
-        new.len()
+        new_normalized.len(),
     ))
 }
 
@@ -1314,6 +1449,22 @@ mod tests {
         assert!(
             output.contains(path.file_name().unwrap().to_string_lossy().as_ref())
                 || output.contains("edited")
+        );
+        assert!(
+            output.contains("before_hash: dh64:"),
+            "expected before_hash in output: {output}"
+        );
+        assert!(
+            output.contains("after_hash: dh64:"),
+            "expected after_hash in output: {output}"
+        );
+        assert!(
+            output.contains("--- a/") && output.contains("+++ b/") && output.contains("@@"),
+            "expected unified diff markers in output: {output}"
+        );
+        assert!(
+            output.contains("-beta") && output.contains("+BETA"),
+            "expected hunk lines in output: {output}"
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), "alpha BETA alpha\n");
 
