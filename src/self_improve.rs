@@ -51,6 +51,28 @@ impl SelfImproveStore {
         Ok(path)
     }
 
+    /// Read the `soul.md` memory file.
+    pub fn read_soul(&self) -> Option<String> {
+        // Look in project first, then fallback to global (mocked via root parent here)
+        let project_soul = self.root.parent().unwrap_or(&self.root).join("soul.md");
+        if project_soul.exists() {
+            fs::read_to_string(project_soul).ok()
+        } else {
+            let global_soul = crate::paths::global_data_dir().join("soul.md");
+            fs::read_to_string(global_soul).ok()
+        }
+    }
+
+    /// Update `soul.md` by appending or replacing memory sections.
+    pub fn write_soul(&self, memory_text: &str) -> std::io::Result<PathBuf> {
+        let project_soul = self.root.parent().unwrap_or(&self.root).join("soul.md");
+        if let Some(parent) = project_soul.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&project_soul, memory_text)?;
+        Ok(project_soul)
+    }
+
     pub fn draft_from_summary(name: &str, task: &str, lessons: &[String]) -> LearnedSkillDraft {
         let mut body = format!(
             "# {}\n\n## When to use\n{}\n\n## Steps\n",
@@ -82,6 +104,18 @@ mod tests {
         let text = fs::read_to_string(path).unwrap();
         assert!(text.contains("name: repeat-task"));
         assert!(text.contains("Verify B"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn soul_roundtrip_uses_project_memory() {
+        let dir = std::env::temp_dir().join(format!("luminus-soul-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let store = SelfImproveStore::new(&dir);
+        let expected = "# Local memory\n\n- verified workflow\n";
+        let path = store.write_soul(expected).unwrap();
+        assert_eq!(path, dir.join(".luminus").join("soul.md"));
+        assert_eq!(store.read_soul().as_deref(), Some(expected));
         let _ = fs::remove_dir_all(&dir);
     }
 }
