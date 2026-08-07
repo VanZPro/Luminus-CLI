@@ -692,6 +692,101 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                                 lines.push(help_text());
                                 app.start_request("command".into(), lines.join("\n"));
                             }
+                            Ok(Command::Context) => {
+                                let cwd = std::env::current_dir()
+                                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                let ctx = luminus::project_context::ProjectContext::discover(&cwd);
+                                if ctx.loaded_paths.is_empty() {
+                                    app.start_request(
+                                        "command".into(),
+                                        "No project context files found (LUMINUS.md, AGENTS.md, .luminus/instructions.md).".to_owned(),
+                                    );
+                                } else {
+                                    let mut lines =
+                                        vec!["Loaded project context files:".to_owned()];
+                                    for p in &ctx.loaded_paths {
+                                        lines.push(format!("  {}", p.display()));
+                                    }
+                                    lines.push(String::new());
+                                    lines.push(ctx.formatted_instructions());
+                                    app.start_request("command".into(), lines.join("\n"));
+                                }
+                            }
+                            Ok(Command::Memory(arg)) => {
+                                let cwd = std::env::current_dir()
+                                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                let store = luminus::self_improve::SelfImproveStore::new(&cwd);
+                                match arg.as_deref() {
+                                    None | Some("inspect") => {
+                                        let soul = store.read_soul().unwrap_or_default();
+                                        if soul.is_empty() {
+                                            app.start_request(
+                                                "command".into(),
+                                                "Memory (soul.md) is empty.".to_owned(),
+                                            );
+                                        } else {
+                                            app.start_request("command".into(), soul);
+                                        }
+                                    }
+                                    Some(text) => match store.write_soul(text) {
+                                        Ok(path) => {
+                                            app.start_request(
+                                                "command".into(),
+                                                format!("Memory written to {}", path.display()),
+                                            );
+                                        }
+                                        Err(e) => {
+                                            app.start_request(
+                                                "command".into(),
+                                                format!("Error writing memory: {e}"),
+                                            );
+                                        }
+                                    },
+                                }
+                            }
+                            Ok(Command::Missions) => {
+                                let cwd = std::env::current_dir()
+                                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                let store = luminus::mission::MissionStore::new(&cwd);
+                                let missions = store.list();
+                                if missions.is_empty() {
+                                    app.start_request(
+                                        "command".into(),
+                                        "No missions found.".to_owned(),
+                                    );
+                                } else {
+                                    let mut lines = vec!["Missions:".to_owned()];
+                                    for m in missions {
+                                        lines.push(format!(
+                                            "  {} | {} | {:?}",
+                                            m.id, m.title, m.status
+                                        ));
+                                    }
+                                    app.start_request("command".into(), lines.join("\n"));
+                                }
+                            }
+                            Ok(Command::Init) => {
+                                let cwd = std::env::current_dir()
+                                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                let dir = cwd.join(".luminus");
+                                let _ = std::fs::create_dir_all(&dir);
+                                let path = dir.join("instructions.md");
+                                let template = "# Luminus Project Instructions\n\nDescribe your project conventions, coding standards, and constraints here.\n";
+                                match std::fs::write(&path, template) {
+                                    Ok(()) => {
+                                        app.start_request(
+                                            "command".into(),
+                                            format!("Created {}", path.display()),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        app.start_request(
+                                            "command".into(),
+                                            format!("Error creating instructions: {e}"),
+                                        );
+                                    }
+                                }
+                            }
                             Err(error) => app.start_request("command".into(), error.to_string()),
                         }
                         if !should_exit && !matches!(prompt.as_str(), "/clear") {

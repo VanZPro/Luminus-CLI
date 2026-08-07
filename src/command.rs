@@ -49,6 +49,14 @@ pub enum Command {
     McpList,
     /// /mcp connect — connect to all configured mcp servers
     McpConnect,
+    /// /context — inspect loaded project instructions and context files
+    Context,
+    /// /memory — inspect or manage memory
+    Memory(Option<String>),
+    /// /missions — list or manage long-running tasks
+    Missions,
+    /// /init — initialize project instructions file (.luminus/instructions.md)
+    Init,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +101,10 @@ pub fn help_text() -> String {
         "  /skill <name>      activate and inject a skill",
         "  /env <key> <val>   write environment variable to .env",
         "  /mcp               list MCP server status",
+        "  /context           inspect project context files",
+        "  /memory [args]     manage soul memory",
+        "  /missions          list long-running tasks",
+        "  /init              initialize project instructions",
     ]
     .join("\n")
 }
@@ -195,6 +207,14 @@ pub fn parse_command(input: &str) -> Result<Command, ParseCommandError> {
         }
         "/mcp" => Ok(Command::McpList),
         "/mcp connect" => Ok(Command::McpConnect),
+        "/context" => Ok(Command::Context),
+        "/memory" => Ok(Command::Memory(None)),
+        command if command.starts_with("/memory ") => {
+            let arg = command.strip_prefix("/memory ").unwrap().trim();
+            Ok(Command::Memory(Some(arg.to_owned())))
+        }
+        "/missions" => Ok(Command::Missions),
+        "/init" => Ok(Command::Init),
         command => Err(ParseCommandError {
             command: command.to_owned(),
         }),
