@@ -45,32 +45,20 @@ impl OpenAiProvider<ReqwestOpenAiTransport> {
         Ok(Self::with_transport(config, ReqwestOpenAiTransport::new()?))
     }
 
-    /// Loads configuration from the environment when an API key is present.
-    ///
-    /// Returns `None` when no key is configured (the caller should fall back
-    /// to the fake provider) and `Some(Err(..))` when a key exists but the
-    /// configuration is invalid (e.g. a non-http base URL).
-    pub fn from_env() -> Option<Result<Self, OpenAiError>> {
-        let api_key = std::env::var("OPENAI_API_KEY")
-            .or_else(|_| std::env::var("LUMINUS_OPENAI_API_KEY"))
-            .ok()?;
-        if api_key.trim().is_empty() {
-            return None;
-        }
-        let base_url = std::env::var("OPENAI_BASE_URL")
-            .or_else(|_| std::env::var("LUMINUS_OPENAI_BASE_URL"))
-            .unwrap_or_else(|_| "https://api.openai.com/v1".to_owned());
-        let model = std::env::var("OPENAI_MODEL")
-            .or_else(|_| std::env::var("LUMINUS_OPENAI_MODEL"))
-            .unwrap_or_else(|_| DEFAULT_MODEL.to_owned());
-        let endpoint = match OpenAiCompatibleEndpoint::new(base_url) {
+    /// Loads configuration by merging global, project, and env config.
+    /// Returns `Err` if the URL is completely invalid. The API key can be None,
+    /// in which case the proxy/provider might reject it later, but we DO NOT fallback
+    /// to fake provider anymore. Luminus requires a real local or remote provider.
+    pub fn from_env(project_root: &std::path::Path) -> Option<Result<Self, OpenAiError>> {
+        let config = crate::config::AppConfig::load(project_root);
+        let endpoint = match OpenAiCompatibleEndpoint::new(config.provider.base_url) {
             Ok(endpoint) => endpoint,
             Err(error) => return Some(Err(error)),
         };
         Some(Self::new(OpenAiCompatibleConfig {
             endpoint,
-            api_key: api_key.to_owned(),
-            model,
+            api_key: config.provider.api_key.unwrap_or_default(),
+            model: config.provider.model,
         }))
     }
 }
@@ -175,12 +163,27 @@ pub enum RuntimeProvider {
 }
 
 impl RuntimeProvider {
-    /// Builds the runtime provider: real OpenAI when the environment has an
-    /// API key, otherwise the deterministic fake provider.
+    /// Builds the runtime provider from config. Falls back to fake only in
+    /// test/offline scenarios. The default config points to the local custom
+    /// OpenAI-compatible server at `http://localhost:20128/v1` with model
+    /// `BomWaktu`, so real usage never silently falls to fake.
     pub fn from_env_or_fake(delay: Duration) -> Self {
-        match OpenAiProvider::from_env() {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        Self::from_config_or_fake(&cwd, delay)
+    }
+
+    /// Explicit config-based constructor (testable).
+    pub fn from_config_or_fake(project_root: &std::path::Path, delay: Duration) -> Self {
+        match OpenAiProvider::from_env(project_root) {
             Some(Ok(provider)) => Self::OpenAi(provider),
-            _ => Self::Fake(crate::provider::FakeProvider::new(delay)),
+            Some(Err(e)) => {
+                eprintln!("[luminus] provider config error: {e}. Falling back to offline mode.");
+                Self::Fake(crate::provider::FakeProvider::new(delay))
+            }
+            None => {
+                eprintln!("[luminus] no provider configured. Falling back to offline mode.");
+                Self::Fake(crate::provider::FakeProvider::new(delay))
+            }
         }
     }
 
@@ -376,10 +379,16 @@ mod tests {
             std::env::remove_var("OPENAI_MODEL");
         }
 
-        // No key configured -> fall back to the fake provider.
-        assert!(!RuntimeProvider::from_env_or_fake(Duration::from_millis(1)).is_openai());
+        // No env key → config loader uses defaults (base_url=localhost, model=BomWaktu).
+        // With the default config it SHOULD create a real provider (not fake).
+        let default_provider = RuntimeProvider::from_env_or_fake(Duration::from_millis(1));
+        assert!(
+            default_provider.is_openai(),
+            "default config should produce real provider"
+        );
+        assert_eq!(default_provider.model().id, "BomWaktu");
 
-        // Valid key + base + model -> real OpenAI provider with the model id.
+        // Env override: explicit key + base + model → takes precedence.
         unsafe {
             std::env::set_var("OPENAI_API_KEY", "test-key");
             std::env::set_var("OPENAI_BASE_URL", "https://example.test/v1/");
@@ -389,21 +398,15 @@ mod tests {
         assert!(provider.is_openai());
         assert_eq!(provider.model().id, "stub-model");
 
-        // Key present but invalid base URL -> configuration error, not fallback.
+        // Key present but invalid base URL → configuration error, not fallback.
         unsafe {
             std::env::set_var("OPENAI_BASE_URL", "nonsense");
         }
+        let cwd = std::path::PathBuf::from(".");
         assert!(matches!(
-            OpenAiProvider::from_env(),
+            OpenAiProvider::from_env(&cwd),
             Some(Err(OpenAiError::InvalidEndpoint))
         ));
-
-        // Blank key counts as absent.
-        unsafe {
-            std::env::set_var("OPENAI_API_KEY", "   ");
-            std::env::set_var("OPENAI_BASE_URL", "https://example.test/v1/");
-        }
-        assert!(OpenAiProvider::from_env().is_none());
 
         unsafe {
             std::env::remove_var("OPENAI_API_KEY");

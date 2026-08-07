@@ -43,6 +43,10 @@ pub enum Command {
     SkillInspect(String),
     /// /skill <name> — activate and inject a skill.
     SkillUse(String),
+    /// /env <key> <val> — write an env var to .env
+    Env(String, String),
+    /// /mcp — list mcp server connection status
+    McpList,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +89,8 @@ pub fn help_text() -> String {
         "  /skills            list available skills",
         "  /skills inspect <name> show detailed skill info",
         "  /skill <name>      activate and inject a skill",
+        "  /env <key> <val>   write environment variable to .env",
+        "  /mcp               list MCP server status",
     ]
     .join("\n")
 }
@@ -171,6 +177,21 @@ pub fn parse_command(input: &str) -> Result<Command, ParseCommandError> {
             }
             Ok(Command::SkillUse(name.to_owned()))
         }
+        command if command.starts_with("/env ") => {
+            let parts: Vec<&str> = command
+                .strip_prefix("/env ")
+                .unwrap()
+                .trim()
+                .splitn(2, ' ')
+                .collect();
+            if parts.len() != 2 {
+                return Err(ParseCommandError {
+                    command: command.to_owned(),
+                });
+            }
+            Ok(Command::Env(parts[0].to_owned(), parts[1].to_owned()))
+        }
+        "/mcp" => Ok(Command::McpList),
         command => Err(ParseCommandError {
             command: command.to_owned(),
         }),

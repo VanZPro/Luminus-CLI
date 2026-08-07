@@ -333,18 +333,22 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             Ok(Command::Provider(name)) => {
                                 let text = match name {
-                                    Some(name) if name == "openai" || name == "openai-compatible" => {
-                                        match OpenAiProvider::from_env() {
+                                    Some(name)
+                                        if name == "openai" || name == "openai-compatible" =>
+                                    {
+                                        let cwd = std::env::current_dir()
+                                            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                        match OpenAiProvider::from_env(&cwd) {
                                             Some(Ok(openai)) => {
                                                 let model = openai.model().id;
                                                 provider = RuntimeProvider::OpenAi(openai);
                                                 format!("Switched to provider: openai ({model})")
                                             }
                                             Some(Err(error)) => format!(
-                                                "OpenAI config error: {error} (set OPENAI_API_KEY)"
+                                                "OpenAI config error: {error} (check .luminus/config.json or env)"
                                             ),
                                             None => {
-                                                "OpenAI not configured: set OPENAI_API_KEY (and optionally OPENAI_BASE_URL / OPENAI_MODEL)".to_owned()
+                                                "OpenAI not configured: set api_key in .luminus/config.json or OPENAI_API_KEY".to_owned()
                                             }
                                         }
                                     }
@@ -544,6 +548,29 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                             Ok(Command::SkillUse(name)) => {
                                 let text = app.handle_skill_use(&name);
                                 app.start_request("command".into(), text);
+                            }
+                            Ok(Command::Env(key, val)) => {
+                                let root = std::env::current_dir()
+                                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                let text = match luminus::setup::SetupWizard::save_env_var(
+                                    &root, &key, &val,
+                                ) {
+                                    Ok(_) => {
+                                        // SAFETY: we are the only thread mutating env at this point.
+                                        unsafe {
+                                            std::env::set_var(&key, &val);
+                                        }
+                                        format!(
+                                            "Set {}={} (saved to .env and active in memory)",
+                                            key, val
+                                        )
+                                    }
+                                    Err(e) => format!("Failed to write .env: {}", e),
+                                };
+                                app.start_request("command".into(), text);
+                            }
+                            Ok(Command::McpList) => {
+                                app.start_request("command".into(), "MCP client foundation is initializing... (servers will be listed here)".to_owned());
                             }
                             Ok(Command::Models) => {
                                 use crate::command::help_text;

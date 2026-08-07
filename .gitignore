@@ -12,7 +12,6 @@ target/
 .idea/
 
 # Local planning / handoff docs — not part of the public release surface
-# (keep on disk for maintainers; never track in git)
 ARCHITECTURE.md
 architecture.md
 PLAN.md
@@ -22,3 +21,6 @@ todo.md
 Intruksi.md
 INTRUKSI.md
 intruksi.md
+
+# Project-local Luminus data (configs, skills, artifacts, policies, secrets)
+.luminus/
