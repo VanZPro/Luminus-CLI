@@ -71,6 +71,10 @@ pub(crate) fn draw_with_composer(frame: &mut Frame<'_>, app: &App, theme: Theme,
     if app.ui_mode() == UiMode::Approval {
         render_approval_overlay(frame, area, app, theme);
     }
+
+    if app.ui_mode() == UiMode::DiffView {
+        render_diff_overlay(frame, area, app, theme);
+    }
 }
 
 fn render_approval_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
@@ -530,5 +534,170 @@ fn render_conversation(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Them
                 .style(Style::default().bg(theme.background).fg(theme.foreground)),
         ),
         area,
+    );
+}
+
+/// Render the diff viewer overlay showing current changes with green/red
+/// line highlights for additions/removals.
+fn render_diff_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
+    let history = app.diff_history();
+    let changes = history.changes();
+
+    let width = area.width.saturating_sub(4).clamp(50, 100);
+    let height = area.height.saturating_sub(2).max(10);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let mut lines: Vec<Line<'_>> = Vec::new();
+
+    if history.undo_stack.is_empty() && history.redo_stack.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No file edits recorded in this session.",
+            Style::default().fg(theme.muted),
+        )));
+    } else {
+        // Summary of changes
+        if !changes.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "Modified files:",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            for (path, added, removed) in &changes {
+                let added_color = if theme.monochrome {
+                    theme.foreground
+                } else {
+                    Color::Green
+                };
+                let removed_color = if theme.monochrome {
+                    theme.muted
+                } else {
+                    Color::Red
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {} ", path.display()),
+                        Style::default().fg(theme.foreground),
+                    ),
+                    Span::styled(format!("+{added} "), Style::default().fg(added_color)),
+                    Span::styled(format!("-{removed}"), Style::default().fg(removed_color)),
+                ]));
+            }
+        }
+
+        // Unified diff for each undo record
+        if !history.undo_stack.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Unified diff:",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )));
+
+            for record in &history.undo_stack {
+                lines.push(Line::from(""));
+                let display = record.path.display().to_string();
+                let added_color = if theme.monochrome {
+                    theme.foreground
+                } else {
+                    Color::Green
+                };
+                let removed_color = if theme.monochrome {
+                    theme.muted
+                } else {
+                    Color::Red
+                };
+
+                lines.push(Line::from(Span::styled(
+                    format!("--- a/{display}"),
+                    Style::default().fg(removed_color),
+                )));
+                lines.push(Line::from(Span::styled(
+                    format!("+++ b/{display}"),
+                    Style::default().fg(added_color),
+                )));
+
+                let before_lines: Vec<&str> = record.before_content.lines().collect();
+                let after_lines: Vec<&str> = record.after_content.lines().collect();
+
+                let prefix_len = before_lines
+                    .iter()
+                    .zip(after_lines.iter())
+                    .take_while(|(a, b)| a == b)
+                    .count();
+
+                let suffix_len = before_lines[prefix_len..]
+                    .iter()
+                    .rev()
+                    .zip(after_lines[prefix_len..].iter().rev())
+                    .take_while(|(a, b)| a == b)
+                    .count();
+
+                let before_mid =
+                    &before_lines[prefix_len..before_lines.len().saturating_sub(suffix_len)];
+                let after_mid =
+                    &after_lines[prefix_len..after_lines.len().saturating_sub(suffix_len)];
+
+                let before_start = prefix_len + 1;
+                let after_start = prefix_len + 1;
+
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "@@ -{},{} +{},{} @@",
+                        before_start,
+                        before_mid.len(),
+                        after_start,
+                        after_mid.len()
+                    ),
+                    Style::default().fg(theme.muted),
+                )));
+
+                for line in before_mid {
+                    lines.push(Line::from(vec![
+                        Span::styled("-", Style::default().fg(removed_color)),
+                        Span::styled(*line, Style::default().fg(removed_color)),
+                    ]));
+                }
+                for line in after_mid {
+                    lines.push(Line::from(vec![
+                        Span::styled("+", Style::default().fg(added_color)),
+                        Span::styled(*line, Style::default().fg(added_color)),
+                    ]));
+                }
+            }
+        }
+
+        // Show redo info
+        if history.redo_count() > 0 {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("({} edits available for redo)", history.redo_count()),
+                Style::default().fg(theme.muted),
+            )));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Esc: close  ·  /undo: undo last  ·  /redo: redo  ·  /revert-file <path>",
+        Style::default().fg(theme.muted),
+    )));
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" DIFF VIEWER ")
+                    .border_style(Style::default().fg(theme.accent))
+                    .style(Style::default().bg(theme.background)),
+            )
+            .wrap(Wrap { trim: false }),
+        popup,
     );
 }

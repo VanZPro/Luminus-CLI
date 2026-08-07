@@ -3,6 +3,7 @@ pub mod app;
 pub mod artifact_store;
 pub mod command;
 pub mod context;
+pub mod diff_history;
 pub mod event;
 pub mod model;
 pub mod permission_policy;

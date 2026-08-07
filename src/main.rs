@@ -178,6 +178,19 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
 
+            // Diff view overlay intercepts Esc to close.
+            if app.ui_mode() == luminus::app::UiMode::DiffView {
+                if let Event::Key(KeyEvent {
+                    code: KeyCode::Esc,
+                    kind: event::KeyEventKind::Press,
+                    ..
+                }) = ev
+                {
+                    app.hide_diff_view();
+                }
+                continue;
+            }
+
             // Model selector overlay intercepts keys while open.
             if app.ui_mode() == luminus::app::UiMode::ModelSelector {
                 if let Event::Key(KeyEvent {
@@ -250,6 +263,14 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                         })
                         .collect();
                     app.show_model_selector(items);
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('o'),
+                    modifiers,
+                    kind: event::KeyEventKind::Press,
+                    ..
+                }) if modifiers.contains(KeyModifiers::CONTROL) => {
+                    app.show_diff_view();
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Esc,
@@ -492,6 +513,25 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                                         });
                                     }
                                 }
+                            }
+                            Ok(Command::Diff) => {
+                                app.show_diff_view();
+                            }
+                            Ok(Command::Changes) => {
+                                let text = app.handle_changes();
+                                app.start_request("command".into(), text);
+                            }
+                            Ok(Command::Undo) => {
+                                let text = app.handle_undo();
+                                app.start_request("command".into(), text);
+                            }
+                            Ok(Command::Redo) => {
+                                let text = app.handle_redo();
+                                app.start_request("command".into(), text);
+                            }
+                            Ok(Command::RevertFile(path)) => {
+                                let text = app.handle_revert_file(&path);
+                                app.start_request("command".into(), text);
                             }
                             Ok(Command::Models) => {
                                 use crate::command::help_text;

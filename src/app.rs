@@ -1,6 +1,7 @@
 use crate::agent::{AgentRun, AgentStatus};
 use crate::artifact_store::ArtifactStore;
 use crate::context::ContextBudget;
+use crate::diff_history::DiffHistory;
 use crate::event::ProviderEvent;
 use crate::permission_policy::{ProjectToolPolicy, ToolPolicy};
 use crate::session::{SavedMessage, Session, SessionEvent};
@@ -129,6 +130,7 @@ pub enum UiMode {
     Normal,
     ModelSelector,
     Approval,
+    DiffView,
 }
 
 /// Pure application state: a reducer over user input and provider events.
@@ -157,6 +159,8 @@ pub struct App {
     session_events: Vec<SessionEvent>,
     /// Disk store for full truncated tool outputs (`<data_root>/artifacts/`).
     artifact_store: ArtifactStore,
+    /// File edit history with undo/redo stacks.
+    diff_history: DiffHistory,
 }
 
 impl App {
@@ -557,6 +561,76 @@ impl App {
     /// Current UI mode.
     pub fn ui_mode(&self) -> UiMode {
         self.ui_mode
+    }
+
+    /// Borrow the file edit history.
+    pub fn diff_history(&self) -> &DiffHistory {
+        &self.diff_history
+    }
+
+    /// Borrow the file edit history mutably.
+    pub fn diff_history_mut(&mut self) -> &mut DiffHistory {
+        &mut self.diff_history
+    }
+
+    /// Show the diff viewer overlay.
+    pub fn show_diff_view(&mut self) {
+        self.ui_mode = UiMode::DiffView;
+    }
+
+    /// Hide the diff viewer overlay.
+    pub fn hide_diff_view(&mut self) {
+        self.ui_mode = UiMode::Normal;
+    }
+
+    /// Handle `/changes`: produce a summary of modified paths with line counts.
+    pub fn handle_changes(&self) -> String {
+        let changes = self.diff_history.changes();
+        if changes.is_empty() {
+            return "No changes recorded.".to_owned();
+        }
+        let mut lines = vec!["Changes:".to_owned()];
+        for (path, added, removed) in changes {
+            lines.push(format!("  {} (+{} -{})", path.display(), added, removed));
+        }
+        lines.join("\n")
+    }
+
+    /// Handle `/undo`: undo the most recent edit and return a summary message.
+    pub fn handle_undo(&mut self) -> String {
+        match self.diff_history.undo() {
+            Some(record) => {
+                format!(
+                    "Undid edit: {} (reverted to before-state)",
+                    record.path.display()
+                )
+            }
+            None => "Nothing to undo.".to_owned(),
+        }
+    }
+
+    /// Handle `/redo`: redo the most recently undone edit and return a summary.
+    pub fn handle_redo(&mut self) -> String {
+        match self.diff_history.redo() {
+            Some(record) => {
+                format!(
+                    "Redid edit: {} (reapplied after-state)",
+                    record.path.display()
+                )
+            }
+            None => "Nothing to redo.".to_owned(),
+        }
+    }
+
+    /// Handle `/revert-file`: revert a file to its initial state.
+    pub fn handle_revert_file(&mut self, path: &str) -> String {
+        let path = std::path::PathBuf::from(path);
+        match self.diff_history.revert_file(&path) {
+            Some(record) => {
+                format!("Reverted {} to its initial state", record.path.display())
+            }
+            None => format!("No edit history for: {path}", path = path.display()),
+        }
     }
 
     /// Show the model selector overlay with the given display items.

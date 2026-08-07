@@ -27,6 +27,16 @@ pub enum Command {
     Tool(String, Vec<String>),
     /// Spawn one independent child-agent request.
     Spawn(String),
+    /// /diff opens the diff viewer overlay for current file edit history.
+    Diff,
+    /// /changes lists modified paths with +lines / -lines.
+    Changes,
+    /// /undo reverts the most recent file edit.
+    Undo,
+    /// /redo reapplies the most recently undone file edit.
+    Redo,
+    /// /revert-file <path> reverts a specific file to its initial state.
+    RevertFile(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +71,11 @@ pub fn help_text() -> String {
         "  /provider          list/show providers",
         "  /provider <name>   switch to the named provider",
         "  /spawn <prompt>    run a child agent on the active provider",
+        "  /diff              open the diff viewer overlay",
+        "  /changes           list modified files with +lines / -lines",
+        "  /undo              undo the most recent file edit",
+        "  /redo              redo the most recently undone file edit",
+        "  /revert-file <path> revert a file to its initial state",
     ]
     .join("\n")
 }
@@ -77,6 +92,10 @@ pub fn parse_command(input: &str) -> Result<Command, ParseCommandError> {
         "/discover" => Ok(Command::Discover),
         "/sessions" => Ok(Command::Sessions),
         "/tools" => Ok(Command::Tools),
+        "/diff" => Ok(Command::Diff),
+        "/changes" => Ok(Command::Changes),
+        "/undo" => Ok(Command::Undo),
+        "/redo" => Ok(Command::Redo),
         command if command.starts_with("/save ") => {
             parse_named(command, "/save ").map(Command::Save)
         }
@@ -92,6 +111,15 @@ pub fn parse_command(input: &str) -> Result<Command, ParseCommandError> {
                 });
             }
             Ok(Command::Spawn(prompt.to_owned()))
+        }
+        command if command.starts_with("/revert-file ") => {
+            let path = command.strip_prefix("/revert-file ").unwrap().trim();
+            if path.is_empty() {
+                return Err(ParseCommandError {
+                    command: command.to_owned(),
+                });
+            }
+            Ok(Command::RevertFile(path.to_owned()))
         }
         command if command.starts_with("/provider ") => {
             let name = command.strip_prefix("/provider ").unwrap();
@@ -235,6 +263,11 @@ mod tests {
             "/tool",
             "/provider",
             "/spawn",
+            "/diff",
+            "/changes",
+            "/undo",
+            "/redo",
+            "/revert-file",
         ] {
             assert!(text.contains(command), "help text missing {command}");
         }
