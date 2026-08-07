@@ -10,7 +10,7 @@ use crossterm::{
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use luminus::{
-    app::App,
+    app::{App, ApprovalChoice, ApprovalGate},
     command::{self, Command, parse_command},
     event::ProviderEvent,
     model::{ModelCatalog, ModelRole, ModelSelection},
@@ -18,7 +18,7 @@ use luminus::{
     providers::openai_runtime::{OpenAiProvider, RuntimeProvider},
     session::{Session, default_root},
     tool_event::ToolCallId,
-    tools::{ToolRegistry, ToolRequest},
+    tools::{ApprovalRequest, ToolRegistry, ToolRequest},
     tui::{self, Theme},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -99,6 +99,11 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
             let ev = event::read()?;
 
             // Approval overlay intercepts keys while a tool is pending.
+            // Keys (Intruksi / Hermes-style):
+            //   Y / Enter — allow once
+            //   A         — allow for session
+            //   N / Esc   — reject once
+            //   D         — reject + deny for session
             if app.ui_mode() == luminus::app::UiMode::Approval {
                 if let Event::Key(KeyEvent {
                     code,
@@ -106,35 +111,23 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                     ..
                 }) = ev
                 {
-                    match code {
+                    let choice = match code {
                         KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                            if let Some(approval) = app.take_approval() {
-                                let id = ToolCallId::new();
-                                app.begin_tool(id, approval.request.name.clone());
-                                let started = Instant::now();
-                                let result = tool_registry.execute(&approval);
-                                let duration = started.elapsed();
-                                let message =
-                                    app.record_tool_result(id, &approval, result, duration);
-                                // Preserve tool activity cards (start_request would clear them).
-                                app.start_command("command", message);
-                                app.apply_provider_event(ProviderEvent::Completed {
-                                    request_id: "command".into(),
-                                });
-                            }
+                            Some(ApprovalChoice::AllowOnce)
+                        }
+                        KeyCode::Char('a') | KeyCode::Char('A') => {
+                            Some(ApprovalChoice::AllowSession)
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                            let tool_name = app
-                                .reject_approval()
-                                .map(|a| a.request.name)
-                                .unwrap_or_else(|| "tool".into());
-                            let message = app.record_tool_rejection(tool_name);
-                            app.start_command("command", message);
-                            app.apply_provider_event(ProviderEvent::Completed {
-                                request_id: "command".into(),
-                            });
+                            Some(ApprovalChoice::Reject)
                         }
-                        _ => {}
+                        KeyCode::Char('d') | KeyCode::Char('D') => {
+                            Some(ApprovalChoice::RejectDenySession)
+                        }
+                        _ => None,
+                    };
+                    if let Some(choice) = choice {
+                        handle_approval_choice(&mut app, &tool_registry, choice);
                     }
                 }
                 continue;
@@ -368,7 +361,9 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                             Ok(Command::Tool(name, args)) => {
                                 let request = ToolRequest { name, args };
                                 match tool_registry.prepare(request) {
-                                    Ok(approval) => app.show_approval(approval),
+                                    Ok(approval) => {
+                                        apply_prepared_approval(&mut app, &tool_registry, approval);
+                                    }
                                     Err(error) => {
                                         app.start_request(
                                             "command".into(),
@@ -491,6 +486,69 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Execute an approved tool through the shared lifecycle path used by both
+/// interactive choices and session auto-allow.
+fn execute_approved_tool(app: &mut App, tool_registry: &ToolRegistry, approval: ApprovalRequest) {
+    let id = ToolCallId::new();
+    app.begin_tool(id, approval.request.name.clone());
+    let started = Instant::now();
+    let result = tool_registry.execute(&approval);
+    let duration = started.elapsed();
+    let message = app.record_tool_result(id, &approval, result, duration);
+    // Preserve tool activity cards (start_request would clear them).
+    app.start_command("command", message);
+    app.apply_provider_event(ProviderEvent::Completed {
+        request_id: "command".into(),
+    });
+}
+
+/// Reject a tool (once or session-deny) through the shared cancelled lifecycle.
+fn reject_tool(app: &mut App, tool_name: impl Into<String>) {
+    let message = app.record_tool_rejection(tool_name);
+    app.start_command("command", message);
+    app.apply_provider_event(ProviderEvent::Completed {
+        request_id: "command".into(),
+    });
+}
+
+/// Apply an operator choice from the approval overlay.
+fn handle_approval_choice(app: &mut App, tool_registry: &ToolRegistry, choice: ApprovalChoice) {
+    match choice {
+        ApprovalChoice::AllowOnce | ApprovalChoice::AllowSession => {
+            if let Some(approval) = app.resolve_approval(choice) {
+                execute_approved_tool(app, tool_registry, approval);
+            }
+        }
+        ApprovalChoice::Reject | ApprovalChoice::RejectDenySession => {
+            let tool_name = app
+                .resolve_approval(choice)
+                .map(|a| a.request.name)
+                .unwrap_or_else(|| "tool".into());
+            reject_tool(app, tool_name);
+        }
+    }
+}
+
+/// Route a prepared approval through session policy, then execute / deny / prompt.
+fn apply_prepared_approval(app: &mut App, tool_registry: &ToolRegistry, approval: ApprovalRequest) {
+    match app.gate_approval(approval) {
+        ApprovalGate::SessionAllowed(approval) => {
+            execute_approved_tool(app, tool_registry, approval);
+        }
+        ApprovalGate::SessionDenied { tool } => {
+            // Emit cancelled lifecycle card, then a clear session-deny transcript line.
+            let _ = app.record_tool_rejection(tool.clone());
+            app.start_command("command", format!("tool {tool}: denied for this session"));
+            app.apply_provider_event(ProviderEvent::Completed {
+                request_id: "command".into(),
+            });
+        }
+        ApprovalGate::NeedsPrompt => {
+            // Overlay is already active via gate_approval → show_approval.
+        }
+    }
 }
 
 #[cfg(test)]

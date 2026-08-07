@@ -8,10 +8,12 @@ use std::{
     collections::hash_map::DefaultHasher,
     fs,
     hash::{Hash, Hasher},
-    io,
+    io::{self, Read},
     path::{Component, Path, PathBuf},
-    process::Command,
-    time::SystemTime,
+    process::{Command, Stdio},
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant, SystemTime},
 };
 
 /// Soft caps for search tools so a single call cannot flood the transcript.
@@ -19,6 +21,15 @@ const GLOB_RESULT_CAP: usize = 200;
 const GREP_MATCH_CAP: usize = 200;
 /// Skip files larger than this during grep (binary dumps / minified noise).
 const GREP_MAX_FILE_BYTES: u64 = 1_048_576;
+
+/// Default `run_shell` wall-clock timeout when `LUMINUS_SHELL_TIMEOUT_SECS` is unset.
+///
+/// Full async cancellation via [`tokio_util::sync::CancellationToken`] is Phase 12D;
+/// this slice only implements timeout-based process kill (cancellable-run foundation).
+pub const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 30;
+
+/// Poll interval while waiting for a shell child to exit.
+const SHELL_WAIT_POLL: Duration = Duration::from_millis(25);
 
 /// The outcome of policy evaluation before a caller approves execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +119,8 @@ pub enum ToolError {
     SecurityDenied(String),
     /// Edit failed because `old_string` was missing or not unique.
     EditFailed(String),
+    /// Shell (or other bounded) tool exceeded its wall-clock timeout and was killed.
+    Timeout(String),
 }
 
 impl std::fmt::Display for ToolError {
@@ -125,6 +138,7 @@ impl std::fmt::Display for ToolError {
                 write!(f, "security policy denied request: {reason}")
             }
             Self::EditFailed(reason) => write!(f, "edit failed: {reason}"),
+            Self::Timeout(reason) => write!(f, "timeout: {reason}"),
         }
     }
 }
@@ -814,22 +828,118 @@ fn edit_file(path: &Path, old: &str, new: &str) -> Result<String, ToolError> {
     ))
 }
 
+/// Resolve the wall-clock timeout for `run_shell`.
+///
+/// Reads `LUMINUS_SHELL_TIMEOUT_SECS` when set to a positive integer; otherwise
+/// uses [`DEFAULT_SHELL_TIMEOUT_SECS`] (30s). Invalid or zero values fall back
+/// to the default.
+pub fn shell_timeout() -> Duration {
+    match std::env::var("LUMINUS_SHELL_TIMEOUT_SECS") {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(secs) if secs > 0 => Duration::from_secs(secs),
+            _ => Duration::from_secs(DEFAULT_SHELL_TIMEOUT_SECS),
+        },
+        Err(_) => Duration::from_secs(DEFAULT_SHELL_TIMEOUT_SECS),
+    }
+}
+
+/// Run one shell command with the configured default timeout ([`shell_timeout`]).
+///
+/// On timeout the child process is killed (`Child::kill`) and
+/// [`ToolError::Timeout`] is returned. Full async cancel via CancellationToken
+/// is deferred to Phase 12D — this is the timeout-kill foundation only.
 fn run_shell(command: &str) -> Result<String, ToolError> {
+    run_shell_with_timeout(command, shell_timeout())
+}
+
+/// Run one shell command, killing the child if it exceeds `timeout`.
+///
+/// Std-only: spawn with piped stdio, drain stdout/stderr on helper threads,
+/// poll `try_wait` until exit or deadline. On Windows, `kill()` on the direct
+/// child is sufficient (process-group kill is harder and not required here).
+///
+/// Destructive denylist / security checks remain in [`ToolRegistry::prepare`]
+/// and are not re-checked here — callers must only invoke this after approval.
+pub fn run_shell_with_timeout(command: &str, timeout: Duration) -> Result<String, ToolError> {
     #[cfg(windows)]
-    let output = Command::new("cmd").args(["/C", command]).output();
+    let mut child = Command::new("cmd")
+        .args(["/C", command])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| ToolError::Process(e.to_string()))?;
+
     #[cfg(not(windows))]
-    let output = Command::new("sh").args(["-c", command]).output();
-    let output = output.map_err(|e| ToolError::Process(e.to_string()))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if output.status.success() {
-        Ok(stdout.into_owned())
-    } else {
-        Err(ToolError::Process(if stderr.trim().is_empty() {
-            stdout.into_owned()
-        } else {
-            stderr.into_owned()
-        }))
+    let mut child = Command::new("sh")
+        .args(["-c", command])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| ToolError::Process(e.to_string()))?;
+
+    let stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| ToolError::Process("failed to capture stdout".into()))?;
+    let stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| ToolError::Process("failed to capture stderr".into()))?;
+
+    let (tx_out, rx_out) = mpsc::channel::<Vec<u8>>();
+    let (tx_err, rx_err) = mpsc::channel::<Vec<u8>>();
+
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut reader = stdout_pipe;
+        let _ = reader.read_to_end(&mut buf);
+        let _ = tx_out.send(buf);
+    });
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut reader = stderr_pipe;
+        let _ = reader.read_to_end(&mut buf);
+        let _ = tx_err.send(buf);
+    });
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout =
+                    String::from_utf8_lossy(&rx_out.recv().unwrap_or_default()).into_owned();
+                let stderr =
+                    String::from_utf8_lossy(&rx_err.recv().unwrap_or_default()).into_owned();
+                if status.success() {
+                    return Ok(stdout);
+                }
+                return Err(ToolError::Process(if stderr.trim().is_empty() {
+                    stdout
+                } else {
+                    stderr
+                }));
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    // Best-effort kill of the direct child. On Windows this is
+                    // enough for typical cmd /C trees; process-group kill is
+                    // out of scope for this slice.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // Drain readers so helper threads do not block forever.
+                    let _ = rx_out.recv_timeout(Duration::from_millis(200));
+                    let _ = rx_err.recv_timeout(Duration::from_millis(200));
+                    return Err(ToolError::Timeout(format!(
+                        "shell command exceeded timeout of {}s",
+                        timeout.as_secs().max(1)
+                    )));
+                }
+                thread::sleep(SHELL_WAIT_POLL);
+            }
+            Err(e) => return Err(ToolError::Process(e.to_string())),
+        }
     }
 }
 
@@ -1173,5 +1283,64 @@ mod tests {
         assert!(!glob_match("*.toml", "src/tools.rs"));
         assert!(segment_match("t?ols", "tools"));
         assert!(!segment_match("t?ols", "toools"));
+    }
+
+    #[test]
+    fn shell_timeout_defaults_and_env_override() {
+        // Unset path is hard to assert under parallel tests; validate the
+        // positive-parse branch and that invalid values fall back.
+        let previous = std::env::var("LUMINUS_SHELL_TIMEOUT_SECS").ok();
+        // SAFETY: test-only env mutation; sequential within this test body.
+        unsafe {
+            std::env::set_var("LUMINUS_SHELL_TIMEOUT_SECS", "12");
+        }
+        assert_eq!(shell_timeout(), Duration::from_secs(12));
+        unsafe {
+            std::env::set_var("LUMINUS_SHELL_TIMEOUT_SECS", "0");
+        }
+        assert_eq!(
+            shell_timeout(),
+            Duration::from_secs(DEFAULT_SHELL_TIMEOUT_SECS)
+        );
+        unsafe {
+            std::env::set_var("LUMINUS_SHELL_TIMEOUT_SECS", "nope");
+        }
+        assert_eq!(
+            shell_timeout(),
+            Duration::from_secs(DEFAULT_SHELL_TIMEOUT_SECS)
+        );
+        match previous {
+            Some(v) => unsafe { std::env::set_var("LUMINUS_SHELL_TIMEOUT_SECS", v) },
+            None => unsafe { std::env::remove_var("LUMINUS_SHELL_TIMEOUT_SECS") },
+        }
+    }
+
+    #[test]
+    fn run_shell_fast_command_succeeds() {
+        let out = run_shell_with_timeout("echo luminus-timeout-ok", Duration::from_secs(5))
+            .expect("fast shell command should succeed");
+        assert!(
+            out.contains("luminus-timeout-ok"),
+            "unexpected stdout: {out:?}"
+        );
+    }
+
+    #[test]
+    fn run_shell_times_out_and_kills_child() {
+        let started = Instant::now();
+        #[cfg(windows)]
+        let cmd = "ping -n 6 127.0.0.1 >nul";
+        #[cfg(not(windows))]
+        let cmd = "sleep 5";
+        let err = run_shell_with_timeout(cmd, Duration::from_secs(1)).unwrap_err();
+        assert!(
+            matches!(err, ToolError::Timeout(ref m) if m.contains("timeout")),
+            "expected ToolError::Timeout, got {err}"
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "timeout kill should return well before the long sleep finishes; took {elapsed:?}"
+        );
     }
 }

@@ -6,8 +6,40 @@ use crate::tool_activity::ToolActivity;
 use crate::tool_event::{ToolCallId, ToolLifecycleEvent};
 use crate::tool_output::{BoundedOutput, Bounds, TruncationKind};
 use crate::tools::{ApprovalRequest, ToolError, ToolOutput};
+use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration;
+
+/// Operator choice on a pending tool-approval overlay (Intruksi / Hermes-style).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalChoice {
+    /// Approve this invocation only.
+    AllowOnce,
+    /// Approve this invocation and auto-allow matching tool for the rest of the process.
+    AllowSession,
+    /// Reject this invocation only.
+    Reject,
+    /// Reject this invocation and auto-deny matching tool for the rest of the process.
+    RejectDenySession,
+}
+
+/// Session-scoped policy for a tool name (process lifetime, cleared on [`App::clear`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionToolPolicy {
+    Allowed,
+    Denied,
+}
+
+/// Result of routing a prepared approval through session allow/deny lists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApprovalGate {
+    /// Tool is on the session allowlist — execute without showing the overlay.
+    SessionAllowed(ApprovalRequest),
+    /// Tool is on the session denylist — skip overlay and surface a denial.
+    SessionDenied { tool: String },
+    /// No session policy matched; the approval overlay is now active.
+    NeedsPrompt,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -88,28 +120,79 @@ pub struct App {
     pub agent_runs: Vec<AgentRun>,
     /// Pending coding tool that requires operator approval.
     pub pending_approval: Option<ApprovalRequest>,
+    /// Session-scoped allow/deny policy keyed by tool name (process lifetime).
+    session_tool_policy: HashMap<String, SessionToolPolicy>,
 }
 
 impl App {
+    /// Current session policy for `tool`, if any.
+    pub fn session_policy(&self, tool: &str) -> Option<SessionToolPolicy> {
+        self.session_tool_policy.get(tool).copied()
+    }
+
+    /// Route a prepared approval through session allow/deny lists.
+    ///
+    /// Denylist is checked first (auto-deny, no overlay). Allowlist auto-takes
+    /// without overlay. Otherwise the approval overlay is shown.
+    pub fn gate_approval(&mut self, request: ApprovalRequest) -> ApprovalGate {
+        let tool = request.request.name.as_str();
+        match self.session_policy(tool) {
+            Some(SessionToolPolicy::Denied) => ApprovalGate::SessionDenied {
+                tool: tool.to_owned(),
+            },
+            Some(SessionToolPolicy::Allowed) => ApprovalGate::SessionAllowed(request),
+            None => {
+                self.show_approval(request);
+                ApprovalGate::NeedsPrompt
+            }
+        }
+    }
+
     /// Show the approval overlay for a tool invocation.
+    ///
+    /// Prefer [`Self::gate_approval`] at call sites so session allow/deny lists
+    /// are honoured; this method forces the overlay regardless of policy.
     pub fn show_approval(&mut self, request: ApprovalRequest) {
         self.pending_approval = Some(request);
         self.ui_mode = UiMode::Approval;
     }
 
-    /// Accept the pending tool approval and clear the overlay.
-    pub fn take_approval(&mut self) -> Option<ApprovalRequest> {
+    /// Apply an operator choice to the pending approval and clear the overlay.
+    ///
+    /// Session choices update the process-local allow/deny map (keyed by tool
+    /// name). Once-only choices leave the map unchanged.
+    pub fn resolve_approval(&mut self, choice: ApprovalChoice) -> Option<ApprovalRequest> {
         self.ui_mode = UiMode::Normal;
-        self.pending_approval.take()
+        let approval = self.pending_approval.take()?;
+        let tool = approval.request.name.clone();
+        match choice {
+            ApprovalChoice::AllowOnce | ApprovalChoice::Reject => {}
+            ApprovalChoice::AllowSession => {
+                self.session_tool_policy
+                    .insert(tool, SessionToolPolicy::Allowed);
+            }
+            ApprovalChoice::RejectDenySession => {
+                self.session_tool_policy
+                    .insert(tool, SessionToolPolicy::Denied);
+            }
+        }
+        Some(approval)
     }
 
-    /// Reject the pending tool approval and clear the overlay.
+    /// Accept the pending tool approval once and clear the overlay.
     ///
+    /// Equivalent to [`Self::resolve_approval`] with [`ApprovalChoice::AllowOnce`].
+    pub fn take_approval(&mut self) -> Option<ApprovalRequest> {
+        self.resolve_approval(ApprovalChoice::AllowOnce)
+    }
+
+    /// Reject the pending tool approval once and clear the overlay.
+    ///
+    /// Equivalent to [`Self::resolve_approval`] with [`ApprovalChoice::Reject`].
     /// Returns the rejected request when one was pending so callers can emit a
     /// matching [`ToolLifecycleEvent::Cancelled`] with the tool name.
     pub fn reject_approval(&mut self) -> Option<ApprovalRequest> {
-        self.ui_mode = UiMode::Normal;
-        self.pending_approval.take()
+        self.resolve_approval(ApprovalChoice::Reject)
     }
 
     /// Append a raw tool output message to the conversation (unbounded).
@@ -421,7 +504,7 @@ impl App {
 
     /// Removes all conversation history, in-flight request tracking, and any
     /// transient UI/approval state so a stale approval overlay cannot survive
-    /// a reset.
+    /// a reset. Also clears session-scoped tool allow/deny lists.
     pub fn clear(&mut self) {
         self.messages.clear();
         self.tool_activities.clear();
@@ -429,6 +512,7 @@ impl App {
         self.request = None;
         self.pending_approval = None;
         self.ui_mode = UiMode::Normal;
+        self.session_tool_policy.clear();
     }
 }
 

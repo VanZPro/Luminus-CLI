@@ -79,7 +79,7 @@ fn render_approval_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, theme: 
     };
     let metadata = approval.metadata().ok();
     let width = area.width.saturating_sub(6).clamp(48, 92);
-    let base_height = 9;
+    let base_height = 10;
     let extra = metadata
         .as_ref()
         .map(|m| 1 + m.affected_paths.len().min(4) + if m.reason.is_empty() { 0 } else { 1 })
@@ -131,7 +131,9 @@ fn render_approval_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, theme: 
         )));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from("Press Y/Enter to approve · N/Esc to reject"));
+    lines.push(Line::from(
+        "Y/Enter: allow once  ·  A: allow session  ·  N/Esc: reject  ·  D: deny session",
+    ));
 
     frame.render_widget(
         Paragraph::new(lines)
