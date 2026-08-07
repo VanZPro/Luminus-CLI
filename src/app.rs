@@ -164,9 +164,20 @@ pub struct App {
     diff_history: DiffHistory,
     /// Skill registry (built-in + global + project skills).
     skill_registry: SkillRegistry,
+    /// Selected index in slash command autocomplete popup.
+    pub slash_autocomplete_index: usize,
 }
 
 impl App {
+    pub fn reset_slash_autocomplete(&mut self) {
+        self.slash_autocomplete_index = 0;
+    }
+
+    pub fn move_slash_autocomplete(&mut self, delta: isize) {
+        let next = self.slash_autocomplete_index as isize + delta;
+        self.slash_autocomplete_index = next.max(0) as usize;
+    }
+
     /// Current session policy for `tool`, if any.
     pub fn session_policy(&self, tool: &str) -> Option<SessionToolPolicy> {
         self.session_tool_policy.get(tool).copied()

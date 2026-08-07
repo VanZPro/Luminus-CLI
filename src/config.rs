@@ -70,6 +70,31 @@ impl AppConfig {
         }
         merged.auto_improve = project.auto_improve || merged.auto_improve;
 
+        // Load a Hermes-compatible dotenv file without printing its contents.
+        // Explicit `LUMINUS_ENV_FILE` wins; Downloads/.env is supported for migration.
+        let env_file = std::env::var_os("LUMINUS_ENV_FILE")
+            .map(PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|home| home.join("Downloads").join(".env")));
+        #[allow(clippy::collapsible_if)]
+        if let Some(path) = env_file {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                for line in content.lines() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    if let Some((key, value)) = line.split_once('=') {
+                        let value = value.trim().trim_matches('"').trim_matches('\'');
+                        if !value.is_empty() {
+                            unsafe {
+                                std::env::set_var(key.trim(), value);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Env overrides (highest priority)
         if let Ok(key) =
             std::env::var("OPENAI_API_KEY").or_else(|_| std::env::var("LUMINUS_OPENAI_API_KEY"))

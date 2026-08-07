@@ -78,11 +78,17 @@ pub(crate) fn draw_with_composer(frame: &mut Frame<'_>, app: &App, theme: Theme,
 
     // Auto-complete hints overlay
     if app.ui_mode() == UiMode::Normal && composer.starts_with('/') {
-        render_slash_hints(frame, area, theme, composer);
+        render_slash_hints(frame, area, app, theme, composer);
     }
 }
 
-fn render_slash_hints(frame: &mut Frame<'_>, area: Rect, theme: Theme, composer: &str) {
+fn render_slash_hints(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &crate::app::App,
+    theme: Theme,
+    composer: &str,
+) {
     const COMMANDS: &[&str] = &[
         "/help",
         "/about",
@@ -131,7 +137,21 @@ fn render_slash_hints(frame: &mut Frame<'_>, area: Rect, theme: Theme, composer:
         height.min(area.height),
     );
     frame.render_widget(ratatui::widgets::Clear, popup);
-    let lines = matches.into_iter().map(Line::from).collect::<Vec<_>>();
+    let selected = app
+        .slash_autocomplete_index
+        .min(matches.len().saturating_sub(1));
+    let lines = matches
+        .into_iter()
+        .enumerate()
+        .map(|(index, command)| {
+            let style = if index == selected {
+                Style::default().fg(theme.background).bg(theme.accent)
+            } else {
+                Style::default().fg(theme.foreground)
+            };
+            Line::styled(command, style)
+        })
+        .collect::<Vec<_>>();
     let widget = Paragraph::new(lines)
         .block(
             Block::default()

@@ -284,11 +284,72 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 Event::Key(KeyEvent {
+                    code: KeyCode::Up,
+                    kind: event::KeyEventKind::Press,
+                    ..
+                }) if composer.starts_with('/') => {
+                    app.move_slash_autocomplete(-1);
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Down,
+                    kind: event::KeyEventKind::Press,
+                    ..
+                }) if composer.starts_with('/') => {
+                    app.move_slash_autocomplete(1);
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Tab,
+                    kind: event::KeyEventKind::Press,
+                    ..
+                }) if composer.starts_with('/') => {
+                    // Auto-complete the selected slash command.
+                    let selected_index = app.slash_autocomplete_index;
+                    const COMMANDS: &[&str] = &[
+                        "/help",
+                        "/about",
+                        "/clear",
+                        "/exit",
+                        "/model",
+                        "/models",
+                        "/discover",
+                        "/save",
+                        "/sessions",
+                        "/load",
+                        "/tools",
+                        "/tool",
+                        "/provider",
+                        "/spawn",
+                        "/diff",
+                        "/changes",
+                        "/undo",
+                        "/redo",
+                        "/revert-file",
+                        "/skills",
+                        "/skill",
+                        "/env",
+                        "/mcp",
+                    ];
+                    let query = composer.to_ascii_lowercase();
+                    let matches: Vec<&str> = COMMANDS
+                        .iter()
+                        .copied()
+                        .filter(|c| c.starts_with(&query))
+                        .collect();
+                    if let Some(selected) =
+                        matches.get(selected_index.min(matches.len().saturating_sub(1)))
+                    {
+                        composer = selected.to_string();
+                    }
+                }
+                Event::Key(KeyEvent {
                     code: KeyCode::Backspace,
                     kind: event::KeyEventKind::Press,
                     ..
                 }) => {
                     composer.pop();
+                    if composer.starts_with('/') {
+                        app.reset_slash_autocomplete();
+                    }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Char(ch),
