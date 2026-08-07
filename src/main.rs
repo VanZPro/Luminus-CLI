@@ -570,7 +570,10 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                                 app.start_request("command".into(), text);
                             }
                             Ok(Command::McpList) => {
-                                app.start_request("command".into(), "MCP client foundation is initializing... (servers will be listed here)".to_owned());
+                                let cwd = std::env::current_dir()
+                                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                let config = luminus::mcp::config::McpConfig::load(&cwd);
+                                app.start_request("command".into(), config.list_servers());
                             }
                             Ok(Command::Models) => {
                                 use crate::command::help_text;
