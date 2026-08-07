@@ -10,3 +10,15 @@ target/
 !.env.example
 .vscode/
 .idea/
+
+# Local planning / handoff docs — not part of the public release surface
+# (keep on disk for maintainers; never track in git)
+ARCHITECTURE.md
+architecture.md
+PLAN.md
+plan.md
+TODO.md
+todo.md
+Intruksi.md
+INTRUKSI.md
+intruksi.md

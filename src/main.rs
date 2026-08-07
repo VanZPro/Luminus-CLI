@@ -17,10 +17,12 @@ use luminus::{
     provider::{FakeProvider, ModelDiscovery, Provider},
     providers::openai_runtime::{OpenAiProvider, RuntimeProvider},
     session::{Session, default_root},
+    tool_event::ToolCallId,
     tools::{ToolRegistry, ToolRequest},
     tui::{self, Theme},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -107,28 +109,27 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                     match code {
                         KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                             if let Some(approval) = app.take_approval() {
-                                let message = match tool_registry.execute(&approval) {
-                                    Ok(output) => {
-                                        let text = format!(
-                                            "tool {} ({}): {}",
-                                            output.tool,
-                                            approval.spec.permission.label(),
-                                            output.output
-                                        );
-                                        app.append_tool_output(&output);
-                                        text
-                                    }
-                                    Err(error) => format!("tool error: {error}"),
-                                };
-                                app.start_request("command".into(), message);
+                                let id = ToolCallId::new();
+                                app.begin_tool(id, approval.request.name.clone());
+                                let started = Instant::now();
+                                let result = tool_registry.execute(&approval);
+                                let duration = started.elapsed();
+                                let message =
+                                    app.record_tool_result(id, &approval, result, duration);
+                                // Preserve tool activity cards (start_request would clear them).
+                                app.start_command("command", message);
                                 app.apply_provider_event(ProviderEvent::Completed {
                                     request_id: "command".into(),
                                 });
                             }
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                            app.reject_approval();
-                            app.start_request("command".into(), "tool rejected".to_owned());
+                            let tool_name = app
+                                .reject_approval()
+                                .map(|a| a.request.name)
+                                .unwrap_or_else(|| "tool".into());
+                            let message = app.record_tool_rejection(tool_name);
+                            app.start_command("command", message);
                             app.apply_provider_event(ProviderEvent::Completed {
                                 request_id: "command".into(),
                             });

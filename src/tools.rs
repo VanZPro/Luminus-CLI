@@ -5,10 +5,20 @@
 //! explicitly approve before invoking a tool.
 
 use std::{
-    fs, io,
-    path::{Path, PathBuf},
+    collections::hash_map::DefaultHasher,
+    fs,
+    hash::{Hash, Hasher},
+    io,
+    path::{Component, Path, PathBuf},
     process::Command,
+    time::SystemTime,
 };
+
+/// Soft caps for search tools so a single call cannot flood the transcript.
+const GLOB_RESULT_CAP: usize = 200;
+const GREP_MATCH_CAP: usize = 200;
+/// Skip files larger than this during grep (binary dumps / minified noise).
+const GREP_MAX_FILE_BYTES: u64 = 1_048_576;
 
 /// The outcome of policy evaluation before a caller approves execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +106,8 @@ pub enum ToolError {
     Process(String),
     NetworkDisabled,
     SecurityDenied(String),
+    /// Edit failed because `old_string` was missing or not unique.
+    EditFailed(String),
 }
 
 impl std::fmt::Display for ToolError {
@@ -112,13 +124,14 @@ impl std::fmt::Display for ToolError {
             Self::SecurityDenied(reason) => {
                 write!(f, "security policy denied request: {reason}")
             }
+            Self::EditFailed(reason) => write!(f, "edit failed: {reason}"),
         }
     }
 }
 
 impl std::error::Error for ToolError {}
 
-pub const TOOL_SPECS: [ToolSpec; 5] = [
+pub const TOOL_SPECS: [ToolSpec; 10] = [
     ToolSpec {
         name: "read_file",
         description: "read a UTF-8 text file",
@@ -133,6 +146,31 @@ pub const TOOL_SPECS: [ToolSpec; 5] = [
         name: "list_dir",
         description: "list directory entries",
         permission: Permission::ReadOnly,
+    },
+    ToolSpec {
+        name: "file_meta",
+        description: "read basic file or directory metadata",
+        permission: Permission::ReadOnly,
+    },
+    ToolSpec {
+        name: "file_metadata",
+        description: "alias of file_meta",
+        permission: Permission::ReadOnly,
+    },
+    ToolSpec {
+        name: "glob",
+        description: "find paths matching a glob pattern under the project root",
+        permission: Permission::ReadOnly,
+    },
+    ToolSpec {
+        name: "grep",
+        description: "search file contents for a pattern (path:line:content)",
+        permission: Permission::ReadOnly,
+    },
+    ToolSpec {
+        name: "edit_file",
+        description: "replace an exact unique string in a file",
+        permission: Permission::Write,
     },
     ToolSpec {
         name: "run_shell",
@@ -193,6 +231,18 @@ impl ToolRegistry {
                 )
             }
             "list_dir" => list_dir(&metadata.affected_paths[0])?,
+            "file_meta" | "file_metadata" => file_meta(&metadata.affected_paths[0])?,
+            "glob" => glob_paths(&args[0], &metadata.cwd)?,
+            "grep" => {
+                let pattern = &args[0];
+                let search_root = metadata
+                    .affected_paths
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| metadata.cwd.clone());
+                grep_files(pattern, &search_root, &metadata.cwd)?
+            }
+            "edit_file" => edit_file(&metadata.affected_paths[0], &args[1], &args[2])?,
             "run_shell" => run_shell(&args[0])?,
             "http_get" => return Err(ToolError::NetworkDisabled),
             _ => return Err(ToolError::UnknownTool(approval.request.name.clone())),
@@ -206,10 +256,17 @@ impl ToolRegistry {
 
 fn validate_args(spec: &ToolSpec, args: &[String]) -> Result<(), ToolError> {
     match spec.name {
-        "read_file" | "list_dir" | "run_shell" | "http_get" if args.is_empty() => {
+        "read_file" | "list_dir" | "run_shell" | "http_get" | "file_meta" | "file_metadata"
+        | "glob"
+            if args.is_empty() =>
+        {
             Err(ToolError::MissingArgument("value"))
         }
         "write_file" if args.len() < 2 => Err(ToolError::MissingArgument("content")),
+        "grep" if args.is_empty() => Err(ToolError::MissingArgument("pattern")),
+        "edit_file" if args.len() < 3 => {
+            Err(ToolError::MissingArgument("path/old_string/new_string"))
+        }
         _ => Ok(()),
     }
 }
@@ -236,10 +293,20 @@ fn strip_verbatim(path: PathBuf) -> PathBuf {
 
 fn metadata_for(spec: &ToolSpec, args: &[String]) -> Result<ApprovalMetadata, ToolError> {
     let cwd = project_root()?;
-    let affected_paths = if matches!(spec.name, "read_file" | "write_file" | "list_dir") {
-        vec![safe_path(&args[0], &cwd)?]
-    } else {
-        Vec::new()
+    let affected_paths = match spec.name {
+        "read_file" | "write_file" | "list_dir" | "file_meta" | "file_metadata" | "edit_file" => {
+            vec![safe_path(&args[0], &cwd)?]
+        }
+        "glob" => {
+            // Pattern must stay relative and inside the project root.
+            validate_glob_pattern(&args[0])?;
+            vec![cwd.clone()]
+        }
+        "grep" => {
+            let raw = args.get(1).map(String::as_str).unwrap_or(".");
+            vec![safe_path(raw, &cwd)?]
+        }
+        _ => Vec::new(),
     };
     let (decision, risk, reason) = classify(spec, args);
     Ok(ApprovalMetadata {
@@ -376,6 +443,377 @@ fn list_dir(path: &Path) -> Result<String, ToolError> {
     Ok(entries.join("\n"))
 }
 
+fn file_meta(path: &Path) -> Result<String, ToolError> {
+    let meta = fs::metadata(path).map_err(|e| ToolError::Io(e.to_string()))?;
+    let kind = if meta.is_dir() {
+        "dir"
+    } else if meta.is_file() {
+        "file"
+    } else {
+        "other"
+    };
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_else(|| "unknown".into());
+    Ok(format!(
+        "path: {}\nsize: {}\nkind: {}\nis_file: {}\nis_dir: {}\nmodified_unix: {}",
+        path.display(),
+        meta.len(),
+        kind,
+        meta.is_file(),
+        meta.is_dir(),
+        modified
+    ))
+}
+
+/// Reject absolute patterns and parent-directory escapes before walking.
+fn validate_glob_pattern(pattern: &str) -> Result<(), ToolError> {
+    let path = Path::new(pattern);
+    if path.is_absolute() {
+        return Err(ToolError::SecurityDenied(
+            "glob pattern must be relative to project root".into(),
+        ));
+    }
+    for component in path.components() {
+        if matches!(component, Component::ParentDir) {
+            return Err(ToolError::SecurityDenied(
+                "glob pattern must not escape project root".into(),
+            ));
+        }
+    }
+    if pattern.is_empty() {
+        return Err(ToolError::MissingArgument("pattern"));
+    }
+    Ok(())
+}
+
+/// Simple recursive glob under `root`. Supports `*`, `?`, and `**` with std only.
+fn glob_paths(pattern: &str, root: &Path) -> Result<String, ToolError> {
+    validate_glob_pattern(pattern)?;
+    let normalized = pattern.replace('\\', "/");
+    let mut matches = Vec::new();
+    walk_glob(root, root, &normalized, &mut matches)?;
+    matches.sort();
+    let truncated = matches.len() > GLOB_RESULT_CAP;
+    matches.truncate(GLOB_RESULT_CAP);
+    let mut out = matches.join("\n");
+    if truncated {
+        out.push_str(&format!("\n… truncated to {GLOB_RESULT_CAP} results"));
+    }
+    if out.is_empty() {
+        out = "(no matches)".into();
+    }
+    Ok(out)
+}
+
+fn walk_glob(
+    root: &Path,
+    current: &Path,
+    pattern: &str,
+    out: &mut Vec<String>,
+) -> Result<(), ToolError> {
+    if out.len() >= GLOB_RESULT_CAP {
+        return Ok(());
+    }
+    let entries = match fs::read_dir(current) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries.filter_map(Result::ok) {
+        if out.len() >= GLOB_RESULT_CAP {
+            break;
+        }
+        let path = entry.path();
+        if is_sensitive(&path) {
+            continue;
+        }
+        // Keep results inside project root (defense against odd junctions).
+        let canonical = match fs::canonicalize(&path) {
+            Ok(p) => strip_verbatim(p),
+            Err(_) => continue,
+        };
+        if !canonical.starts_with(root) {
+            continue;
+        }
+        let rel = match path.strip_prefix(root) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if glob_match(pattern, &rel_str) {
+            out.push(rel_str.clone());
+        }
+        if path.is_dir() {
+            // Skip heavy / irrelevant trees.
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == ".git" || name == "target" || name == "node_modules" {
+                continue;
+            }
+            walk_glob(root, &path, pattern, out)?;
+        }
+    }
+    Ok(())
+}
+
+/// Match a relative path against a glob pattern (`*`, `?`, `**`).
+fn glob_match(pattern: &str, path: &str) -> bool {
+    glob_match_parts(
+        &split_glob_segments(pattern),
+        &path
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn split_glob_segments(pattern: &str) -> Vec<&str> {
+    pattern.split('/').filter(|s| !s.is_empty()).collect()
+}
+
+fn glob_match_parts(pattern: &[&str], path: &[&str]) -> bool {
+    match (pattern.first(), path.first()) {
+        (None, None) => true,
+        (Some(&"**"), _) => {
+            // `**` matches zero or more path segments.
+            if glob_match_parts(&pattern[1..], path) {
+                return true;
+            }
+            if path.is_empty() {
+                return false;
+            }
+            glob_match_parts(pattern, &path[1..])
+        }
+        (Some(p), Some(seg)) => {
+            segment_match(p, seg) && glob_match_parts(&pattern[1..], &path[1..])
+        }
+        (Some(_), None) | (None, Some(_)) => false,
+    }
+}
+
+fn segment_match(pattern: &str, segment: &str) -> bool {
+    let pb: Vec<char> = pattern.chars().collect();
+    let sb: Vec<char> = segment.chars().collect();
+    segment_match_chars(&pb, &sb)
+}
+
+fn segment_match_chars(pattern: &[char], segment: &[char]) -> bool {
+    match (pattern.first(), segment.first()) {
+        (None, None) => true,
+        (Some('*'), _) => {
+            // `*` matches any run of chars within one segment.
+            if segment_match_chars(&pattern[1..], segment) {
+                return true;
+            }
+            if segment.is_empty() {
+                return false;
+            }
+            segment_match_chars(pattern, &segment[1..])
+        }
+        (Some('?'), Some(_)) => segment_match_chars(&pattern[1..], &segment[1..]),
+        (Some(pc), Some(sc)) if pc == sc => segment_match_chars(&pattern[1..], &segment[1..]),
+        _ => false,
+    }
+}
+
+fn grep_files(pattern: &str, search_root: &Path, project_root: &Path) -> Result<String, ToolError> {
+    if pattern.is_empty() {
+        return Err(ToolError::MissingArgument("pattern"));
+    }
+    let mut matches = Vec::new();
+    let mut truncated = false;
+    grep_walk(
+        search_root,
+        project_root,
+        pattern,
+        &mut matches,
+        &mut truncated,
+    )?;
+    if matches.is_empty() {
+        return Ok("(no matches)".into());
+    }
+    let mut out = matches.join("\n");
+    if truncated {
+        out.push_str(&format!("\n… truncated to {GREP_MATCH_CAP} matches"));
+    }
+    Ok(out)
+}
+
+fn grep_walk(
+    current: &Path,
+    project_root: &Path,
+    pattern: &str,
+    out: &mut Vec<String>,
+    truncated: &mut bool,
+) -> Result<(), ToolError> {
+    if out.len() >= GREP_MATCH_CAP {
+        *truncated = true;
+        return Ok(());
+    }
+
+    let meta = match fs::metadata(current) {
+        Ok(m) => m,
+        Err(_) => return Ok(()),
+    };
+
+    if meta.is_file() {
+        grep_one_file(current, project_root, pattern, out, truncated)?;
+        return Ok(());
+    }
+
+    if !meta.is_dir() {
+        return Ok(());
+    }
+
+    let entries = match fs::read_dir(current) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries.filter_map(Result::ok) {
+        if out.len() >= GREP_MATCH_CAP {
+            *truncated = true;
+            break;
+        }
+        let path = entry.path();
+        if is_sensitive(&path) {
+            continue;
+        }
+        if let Ok(canonical) = fs::canonicalize(&path) {
+            let canonical = strip_verbatim(canonical);
+            if !canonical.starts_with(project_root) {
+                continue;
+            }
+        }
+        if path.is_dir() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == ".git" || name == "target" || name == "node_modules" {
+                continue;
+            }
+            grep_walk(&path, project_root, pattern, out, truncated)?;
+        } else {
+            grep_one_file(&path, project_root, pattern, out, truncated)?;
+        }
+    }
+    Ok(())
+}
+
+fn grep_one_file(
+    path: &Path,
+    project_root: &Path,
+    pattern: &str,
+    out: &mut Vec<String>,
+    truncated: &mut bool,
+) -> Result<(), ToolError> {
+    if out.len() >= GREP_MATCH_CAP {
+        *truncated = true;
+        return Ok(());
+    }
+    if is_sensitive(path) {
+        return Ok(());
+    }
+    let meta = match fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return Ok(()),
+    };
+    if !meta.is_file() || meta.len() > GREP_MAX_FILE_BYTES {
+        return Ok(());
+    }
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(_) => return Ok(()),
+    };
+    if is_binary_ish(&bytes) {
+        return Ok(());
+    }
+    let text = match String::from_utf8(bytes) {
+        Ok(t) => t,
+        Err(_) => return Ok(()),
+    };
+    let display = path
+        .strip_prefix(project_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    for (idx, line) in text.lines().enumerate() {
+        if out.len() >= GREP_MATCH_CAP {
+            *truncated = true;
+            break;
+        }
+        if line.contains(pattern) {
+            out.push(format!("{display}:{}:{line}", idx + 1));
+        }
+    }
+    Ok(())
+}
+
+fn is_binary_ish(bytes: &[u8]) -> bool {
+    if bytes.contains(&0) {
+        return true;
+    }
+    // High ratio of non-text control bytes ⇒ treat as binary.
+    let sample = &bytes[..bytes.len().min(8192)];
+    if sample.is_empty() {
+        return false;
+    }
+    let nontext = sample
+        .iter()
+        .filter(|&&b| b < 0x09 || (b > 0x0d && b < 0x20) || b == 0x7f)
+        .count();
+    nontext * 100 / sample.len() > 10
+}
+
+fn content_hash(content: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Replace exactly one occurrence of `old` with `new`. Refuses missing or
+/// ambiguous matches. Re-reads before write and rejects stale content via hash.
+fn edit_file(path: &Path, old: &str, new: &str) -> Result<String, ToolError> {
+    if old.is_empty() {
+        return Err(ToolError::EditFailed("old_string must not be empty".into()));
+    }
+    let original = fs::read_to_string(path).map_err(|e| ToolError::Io(e.to_string()))?;
+    let hash = content_hash(&original);
+    let occurrences = original.matches(old).count();
+    match occurrences {
+        0 => {
+            return Err(ToolError::EditFailed("old_string not found in file".into()));
+        }
+        1 => {}
+        n => {
+            return Err(ToolError::EditFailed(format!(
+                "old_string is ambiguous ({n} occurrences); refuse to edit"
+            )));
+        }
+    }
+    let updated = original.replacen(old, new, 1);
+
+    // Content-hash safety: refuse if the file changed under us.
+    let recheck = fs::read_to_string(path).map_err(|e| ToolError::Io(e.to_string()))?;
+    if content_hash(&recheck) != hash {
+        return Err(ToolError::EditFailed(
+            "file changed since read (stale edit rejected)".into(),
+        ));
+    }
+    if recheck != original {
+        return Err(ToolError::EditFailed(
+            "file content mismatch before write".into(),
+        ));
+    }
+
+    fs::write(path, &updated).map_err(|e| ToolError::Io(e.to_string()))?;
+    Ok(format!(
+        "edited {} (replaced {} bytes with {} bytes)",
+        path.display(),
+        old.len(),
+        new.len()
+    ))
+}
+
 fn run_shell(command: &str) -> Result<String, ToolError> {
     #[cfg(windows)]
     let output = Command::new("cmd").args(["/C", command]).output();
@@ -414,6 +852,11 @@ mod tests {
                 "read_file",
                 "write_file",
                 "list_dir",
+                "file_meta",
+                "file_metadata",
+                "glob",
+                "grep",
+                "edit_file",
                 "run_shell",
                 "http_get"
             ]
@@ -539,5 +982,196 @@ mod tests {
                 .contains(path.file_name().unwrap().to_string_lossy().as_ref())
         );
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_meta_reports_basic_fields() {
+        let registry = ToolRegistry;
+        let approval = registry
+            .prepare(ToolRequest {
+                name: "file_meta".into(),
+                args: vec!["Cargo.toml".into()],
+            })
+            .unwrap();
+        let meta = approval.metadata().unwrap();
+        assert_eq!(meta.risk, RiskLevel::Low);
+        assert_eq!(meta.affected_paths.len(), 1);
+        let output = registry.execute(&approval).unwrap().output;
+        assert!(output.contains("kind: file"));
+        assert!(output.contains("is_file: true"));
+        assert!(output.contains("size:"));
+        assert!(output.contains("modified_unix:"));
+    }
+
+    #[test]
+    fn file_metadata_alias_and_sensitive_deny() {
+        let registry = ToolRegistry;
+        let approval = registry
+            .prepare(ToolRequest {
+                name: "file_metadata".into(),
+                args: vec!["Cargo.toml".into()],
+            })
+            .unwrap();
+        assert!(
+            registry
+                .execute(&approval)
+                .unwrap()
+                .output
+                .contains("kind:")
+        );
+
+        let denied = registry.prepare(ToolRequest {
+            name: "file_meta".into(),
+            args: vec![".env".into()],
+        });
+        assert!(matches!(
+            denied,
+            Err(ToolError::SecurityDenied(ref r)) if r.contains("sensitive")
+        ));
+    }
+
+    #[test]
+    fn glob_finds_cargo_toml_and_blocks_escape() {
+        let registry = ToolRegistry;
+        let approval = registry
+            .prepare(ToolRequest {
+                name: "glob".into(),
+                args: vec!["Cargo.t*".into()],
+            })
+            .unwrap();
+        let output = registry.execute(&approval).unwrap().output;
+        assert!(
+            output
+                .lines()
+                .any(|l| l == "Cargo.toml" || l.ends_with("Cargo.toml")),
+            "glob should find Cargo.toml; got {output:?}"
+        );
+
+        let escape = registry.prepare(ToolRequest {
+            name: "glob".into(),
+            args: vec!["../**".into()],
+        });
+        assert!(matches!(escape, Err(ToolError::SecurityDenied(_))));
+
+        let absolute = registry.prepare(ToolRequest {
+            name: "glob".into(),
+            args: vec![if cfg!(windows) {
+                r"C:\Windows\*".into()
+            } else {
+                "/*".into()
+            }],
+        });
+        assert!(matches!(absolute, Err(ToolError::SecurityDenied(_))));
+    }
+
+    #[test]
+    fn grep_returns_path_line_content_and_respects_security() {
+        let registry = ToolRegistry;
+        let approval = registry
+            .prepare(ToolRequest {
+                name: "grep".into(),
+                args: vec!["Permission-gated".into(), "src".into()],
+            })
+            .unwrap();
+        let output = registry.execute(&approval).unwrap().output;
+        assert!(
+            output.contains("tools.rs:") && output.contains("Permission-gated"),
+            "grep should report path:line:content; got {output:?}"
+        );
+
+        let denied = registry.prepare(ToolRequest {
+            name: "grep".into(),
+            args: vec!["SECRET".into(), ".env".into()],
+        });
+        assert!(matches!(
+            denied,
+            Err(ToolError::SecurityDenied(ref r)) if r.contains("sensitive")
+        ));
+
+        assert!(matches!(
+            registry.prepare(ToolRequest {
+                name: "grep".into(),
+                args: Vec::new(),
+            }),
+            Err(ToolError::MissingArgument(_))
+        ));
+    }
+
+    #[test]
+    fn edit_file_unique_replace_and_ambiguity_guards() {
+        let registry = ToolRegistry;
+        let path = std::env::temp_dir().join(format!(
+            "luminus-edit-{}-{}.txt",
+            std::process::id(),
+            "unique"
+        ));
+        fs::write(&path, "alpha beta alpha\n").unwrap();
+        let path_string = path.to_string_lossy().into_owned();
+
+        // Ambiguous: "alpha" appears twice.
+        let ambiguous = registry
+            .prepare(ToolRequest {
+                name: "edit_file".into(),
+                args: vec![path_string.clone(), "alpha".into(), "ALPHA".into()],
+            })
+            .unwrap();
+        let err = registry.execute(&ambiguous).unwrap_err();
+        assert!(
+            matches!(err, ToolError::EditFailed(ref r) if r.contains("ambiguous")),
+            "expected ambiguous edit failure, got {err}"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "alpha beta alpha\n");
+
+        // Missing old_string.
+        let missing = registry
+            .prepare(ToolRequest {
+                name: "edit_file".into(),
+                args: vec![path_string.clone(), "does-not-exist".into(), "x".into()],
+            })
+            .unwrap();
+        assert!(matches!(
+            registry.execute(&missing),
+            Err(ToolError::EditFailed(ref r)) if r.contains("not found")
+        ));
+
+        // Unique replace.
+        let ok = registry
+            .prepare(ToolRequest {
+                name: "edit_file".into(),
+                args: vec![path_string.clone(), "beta".into(), "BETA".into()],
+            })
+            .unwrap();
+        let meta = ok.metadata().unwrap();
+        assert_eq!(meta.risk, RiskLevel::Medium);
+        assert_eq!(meta.affected_paths.len(), 1);
+        let output = registry.execute(&ok).unwrap().output;
+        assert!(
+            output.contains(path.file_name().unwrap().to_string_lossy().as_ref())
+                || output.contains("edited")
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "alpha BETA alpha\n");
+
+        // Sensitive path denied at prepare.
+        let sensitive = registry.prepare(ToolRequest {
+            name: "edit_file".into(),
+            args: vec![".env".into(), "a".into(), "b".into()],
+        });
+        assert!(matches!(
+            sensitive,
+            Err(ToolError::SecurityDenied(ref r)) if r.contains("sensitive")
+        ));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn glob_match_supports_star_question_and_doublestar() {
+        assert!(glob_match("*.rs", "tools.rs"));
+        assert!(glob_match("src/*.rs", "src/tools.rs"));
+        assert!(glob_match("src/**/*.rs", "src/tui/mod.rs"));
+        assert!(glob_match("**/tools.rs", "src/tools.rs"));
+        assert!(!glob_match("*.toml", "src/tools.rs"));
+        assert!(segment_match("t?ols", "tools"));
+        assert!(!segment_match("t?ols", "toools"));
     }
 }
