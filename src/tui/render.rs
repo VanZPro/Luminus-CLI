@@ -75,6 +75,72 @@ pub(crate) fn draw_with_composer(frame: &mut Frame<'_>, app: &App, theme: Theme,
     if app.ui_mode() == UiMode::DiffView {
         render_diff_overlay(frame, area, app, theme);
     }
+
+    // Auto-complete hints overlay
+    if app.ui_mode() == UiMode::Normal && composer.starts_with('/') {
+        render_slash_hints(frame, area, theme, composer);
+    }
+}
+
+fn render_slash_hints(frame: &mut Frame<'_>, area: Rect, theme: Theme, composer: &str) {
+    const COMMANDS: &[&str] = &[
+        "/help",
+        "/about",
+        "/clear",
+        "/exit",
+        "/model",
+        "/models",
+        "/discover",
+        "/save",
+        "/sessions",
+        "/load",
+        "/tools",
+        "/tool",
+        "/provider",
+        "/spawn",
+        "/diff",
+        "/changes",
+        "/undo",
+        "/redo",
+        "/revert-file",
+        "/skills",
+        "/skill",
+        "/env",
+        "/mcp",
+    ];
+    let query = composer.to_ascii_lowercase();
+    let matches: Vec<&str> = COMMANDS
+        .iter()
+        .copied()
+        .filter(|command| command.starts_with(&query))
+        .take(8)
+        .collect();
+    if matches.is_empty() {
+        return;
+    }
+    let width = matches.iter().map(|s| s.len()).max().unwrap_or(8) as u16 + 4;
+    let height = matches.len() as u16 + 2;
+    let x = area.x.saturating_add(2);
+    let y = area
+        .y
+        .saturating_add(area.height.saturating_sub(7 + height));
+    let popup = Rect::new(
+        x,
+        y,
+        width.min(area.width.saturating_sub(4)),
+        height.min(area.height),
+    );
+    frame.render_widget(ratatui::widgets::Clear, popup);
+    let lines = matches.into_iter().map(Line::from).collect::<Vec<_>>();
+    let widget = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .title(" Slash commands · Enter to send ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.accent)),
+        )
+        .style(Style::default().fg(theme.foreground));
+    frame.render_widget(widget, popup);
 }
 
 fn render_approval_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {

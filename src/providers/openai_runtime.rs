@@ -51,13 +51,22 @@ impl OpenAiProvider<ReqwestOpenAiTransport> {
     /// to fake provider anymore. Luminus requires a real local or remote provider.
     pub fn from_env(project_root: &std::path::Path) -> Option<Result<Self, OpenAiError>> {
         let config = crate::config::AppConfig::load(project_root);
-        let endpoint = match OpenAiCompatibleEndpoint::new(config.provider.base_url) {
+        let url = config.provider.base_url.clone();
+        let mut api_key = config.provider.api_key.unwrap_or_default();
+        if api_key.trim().is_empty()
+            && (url.contains("localhost") || url.contains("127.0.0.1") || url.contains("20128"))
+        {
+            api_key = "sk-local-dummy-key".to_owned();
+        }
+
+        let endpoint = match OpenAiCompatibleEndpoint::new(&url) {
             Ok(endpoint) => endpoint,
             Err(error) => return Some(Err(error)),
         };
+
         Some(Self::new(OpenAiCompatibleConfig {
             endpoint,
-            api_key: config.provider.api_key.unwrap_or_default(),
+            api_key,
             model: config.provider.model,
         }))
     }
