@@ -533,6 +533,18 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                                 let text = app.handle_revert_file(&path);
                                 app.start_request("command".into(), text);
                             }
+                            Ok(Command::Skills) => {
+                                let text = app.handle_skills_list();
+                                app.start_request("command".into(), text);
+                            }
+                            Ok(Command::SkillInspect(name)) => {
+                                let text = app.handle_skill_inspect(&name);
+                                app.start_request("command".into(), text);
+                            }
+                            Ok(Command::SkillUse(name)) => {
+                                let text = app.handle_skill_use(&name);
+                                app.start_request("command".into(), text);
+                            }
                             Ok(Command::Models) => {
                                 use crate::command::help_text;
                                 let mut lines = vec!["Configured models:".to_owned()];

@@ -9,6 +9,7 @@ pub mod model;
 pub mod permission_policy;
 pub mod providers;
 pub mod session;
+pub mod skill;
 pub mod tool_activity;
 pub mod tool_event;
 pub mod tool_output;

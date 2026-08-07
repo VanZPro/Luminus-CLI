@@ -5,6 +5,7 @@ use crate::diff_history::DiffHistory;
 use crate::event::ProviderEvent;
 use crate::permission_policy::{ProjectToolPolicy, ToolPolicy};
 use crate::session::{SavedMessage, Session, SessionEvent};
+use crate::skill::SkillRegistry;
 use crate::tool_activity::ToolActivity;
 use crate::tool_event::{ToolCallId, ToolLifecycleEvent};
 use crate::tool_output::{BoundedOutput, Bounds, TruncationKind};
@@ -161,6 +162,8 @@ pub struct App {
     artifact_store: ArtifactStore,
     /// File edit history with undo/redo stacks.
     diff_history: DiffHistory,
+    /// Skill registry (built-in + global + project skills).
+    skill_registry: SkillRegistry,
 }
 
 impl App {
@@ -630,6 +633,45 @@ impl App {
                 format!("Reverted {} to its initial state", record.path.display())
             }
             None => format!("No edit history for: {path}", path = path.display()),
+        }
+    }
+
+    /// Handle `/skills` or `/skills list`: discover and list skills.
+    pub fn handle_skills_list(&self) -> String {
+        let items = self.skill_registry.list_skills();
+        if items.is_empty() {
+            "No skills found. Add skills to .luminus/skills/<name>/SKILL.md or ~/.config/luminus/skills/".to_owned()
+        } else {
+            items
+        }
+    }
+
+    /// Handle `/skills inspect <name>`: show detailed skill metadata.
+    pub fn handle_skill_inspect(&self, name: &str) -> String {
+        match self.skill_registry.inspect_skill(name) {
+            Ok(text) => text,
+            Err(error) => format!("{error}"),
+        }
+    }
+
+    /// Handle `/skill <name>`: load and activate a skill.
+    pub fn handle_skill_use(&mut self, name: &str) -> String {
+        match self.skill_registry.load_skill(name) {
+            Ok(skill) => {
+                // Inject skill instructions as a system message for context.
+                self.messages.push(Message {
+                    role: Role::System,
+                    content: format!(
+                        "[Skill activated: {} ({})]\n\n{}",
+                        skill.metadata.name, skill.metadata.source, skill.content
+                    ),
+                });
+                format!(
+                    "Skill '{}' activated ({}). Instructions injected into context.",
+                    skill.metadata.name, skill.metadata.source
+                )
+            }
+            Err(error) => format!("{error}"),
         }
     }
 

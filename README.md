@@ -12,6 +12,8 @@ Terminal-native AI coding agent written in Rust. Ratatui TUI, streaming chat, pr
 - **`/discover`** — list models from the active provider’s `GET /models`
 - **Models** — role map (`default` / `fast` / `deep`), `/model`, `/models`, `Ctrl+M` selector
 - **Sessions** — JSON under the platform data dir; `/save`, `/sessions`, `/load` (atomic write, sanitized names); event log for tools/approvals
+- **Skills** — `/skills`, `/skills list`, `/skills inspect <name>`, `/skill <name>` (built-in, global `~/.config/luminus/skills/`, project `.luminus/skills/`)
+- **Diff & History** — `/diff` (interactive TUI overlay), `/changes`, `/undo`, `/redo`, `/revert-file <path>`
 - **Tools** — `/tools`, `/tool <name> …` with approval overlay; specs: `read_file`, `write_file`, `list_dir`, `run_shell`, `file_meta`/`file_metadata`, `glob`, `grep`, `edit_file` (optional content-hash + unified diff output), `http_get` (disabled)
 - **Approval choices** — `Y`/Enter once, `A` session allow, `P` project allow (persist), `N`/Esc reject, `D` session deny, `X` project deny (persist)
 - **Security basics** — explicit approval; path canonicalization + project-root check for relative paths; sensitive-path deny (`.env`, keys, `.ssh`/`.aws`, …); shell denylist for a few destructive patterns; project policy file `.luminus/tool_policy.json`; API keys redacted in debug paths

@@ -37,6 +37,12 @@ pub enum Command {
     Redo,
     /// /revert-file <path> reverts a specific file to its initial state.
     RevertFile(String),
+    /// /skills, /skills list — list available skills.
+    Skills,
+    /// /skills inspect <name> — show detailed skill info.
+    SkillInspect(String),
+    /// /skill <name> — activate and inject a skill.
+    SkillUse(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +82,9 @@ pub fn help_text() -> String {
         "  /undo              undo the most recent file edit",
         "  /redo              redo the most recently undone file edit",
         "  /revert-file <path> revert a file to its initial state",
+        "  /skills            list available skills",
+        "  /skills inspect <name> show detailed skill info",
+        "  /skill <name>      activate and inject a skill",
     ]
     .join("\n")
 }
@@ -142,6 +151,25 @@ pub fn parse_command(input: &str) -> Result<Command, ParseCommandError> {
                 .map_err(|_| ParseCommandError {
                     command: command.to_owned(),
                 })
+        }
+        "/skills" | "/skills list" => Ok(Command::Skills),
+        command if command.starts_with("/skills inspect ") => {
+            let name = command.strip_prefix("/skills inspect ").unwrap().trim();
+            if name.is_empty() || name.contains('/') || name.contains('\\') {
+                return Err(ParseCommandError {
+                    command: command.to_owned(),
+                });
+            }
+            Ok(Command::SkillInspect(name.to_owned()))
+        }
+        command if command.starts_with("/skill ") => {
+            let name = command.strip_prefix("/skill ").unwrap().trim();
+            if name.is_empty() || name.contains('/') || name.contains('\\') {
+                return Err(ParseCommandError {
+                    command: command.to_owned(),
+                });
+            }
+            Ok(Command::SkillUse(name.to_owned()))
         }
         command => Err(ParseCommandError {
             command: command.to_owned(),
@@ -268,8 +296,30 @@ mod tests {
             "/undo",
             "/redo",
             "/revert-file",
+            "/skills",
+            "/skill",
         ] {
             assert!(text.contains(command), "help text missing {command}");
         }
+    }
+
+    #[test]
+    fn parses_skills_commands() {
+        assert_eq!(parse_command("/skills"), Ok(Command::Skills));
+        assert_eq!(parse_command("/skills list"), Ok(Command::Skills));
+        assert_eq!(
+            parse_command("/skills inspect fix-tests"),
+            Ok(Command::SkillInspect("fix-tests".into()))
+        );
+        assert_eq!(
+            parse_command("/skill code-review"),
+            Ok(Command::SkillUse("code-review".into()))
+        );
+        // Empty names rejected
+        assert!(parse_command("/skills inspect ").is_err());
+        assert!(parse_command("/skill ").is_err());
+        // Path traversal rejected
+        assert!(parse_command("/skills inspect ../secret").is_err());
+        assert!(parse_command("/skill /etc/passwd").is_err());
     }
 }
