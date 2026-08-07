@@ -47,6 +47,8 @@ pub enum Command {
     Env(String, String),
     /// /mcp — list mcp server connection status
     McpList,
+    /// /mcp connect — connect to all configured mcp servers
+    McpConnect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +194,7 @@ pub fn parse_command(input: &str) -> Result<Command, ParseCommandError> {
             Ok(Command::Env(parts[0].to_owned(), parts[1].to_owned()))
         }
         "/mcp" => Ok(Command::McpList),
+        "/mcp connect" => Ok(Command::McpConnect),
         command => Err(ParseCommandError {
             command: command.to_owned(),
         }),

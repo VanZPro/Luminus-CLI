@@ -72,6 +72,7 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
     let mut provider = RuntimeProvider::from_env_or_fake(Duration::from_millis(80));
     let mut model_catalog = ModelCatalog::new();
     let tool_registry = ToolRegistry;
+    let mut mcp_manager = luminus::mcp::McpManager::new();
     for (role, model) in [
         (ModelRole::Default, "fake-model"),
         (ModelRole::Fast, "fake-fast"),
@@ -635,6 +636,27 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                                     .unwrap_or_else(|_| std::path::PathBuf::from("."));
                                 let config = luminus::mcp::config::McpConfig::load(&cwd);
                                 app.start_request("command".into(), config.list_servers());
+                            }
+                            Ok(Command::McpConnect) => {
+                                let cwd = std::env::current_dir()
+                                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                let config = luminus::mcp::config::McpConfig::load(&cwd);
+                                let results = mcp_manager.connect_all(&config).await;
+                                let mut lines = vec!["Connecting to MCP Servers...".to_owned()];
+                                for (srv, res) in results {
+                                    match res {
+                                        Ok(()) => lines.push(format!("  {} -> connected ok", srv)),
+                                        Err(e) => lines.push(format!("  {} -> error: {}", srv, e)),
+                                    }
+                                }
+                                let specs = mcp_manager.dynamic_tool_specs();
+                                if !specs.is_empty() {
+                                    lines.push(format!("\nDiscovered {} MCP tools:", specs.len()));
+                                    for s in specs {
+                                        lines.push(format!("  {} ({})", s.name, s.description));
+                                    }
+                                }
+                                app.start_request("command".into(), lines.join("\n"));
                             }
                             Ok(Command::Models) => {
                                 use crate::command::help_text;

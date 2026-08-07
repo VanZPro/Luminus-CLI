@@ -1,5 +1,6 @@
 use luminus::mcp::client::McpClient;
 use luminus::mcp::config::{McpConfig, McpServerConfig};
+use luminus::mcp::manager::McpManager;
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -111,5 +112,46 @@ fn mcp_config_lists_servers_correctly() {
     assert!(list_str.contains("ares-mcp"));
     assert!(list_str.contains("node /path/to/ares/index.js"));
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn mcp_manager_discovers_and_calls_dynamic_tool() {
+    let script = r#"
+import sys, json
+for line in sys.stdin:
+    req = json.loads(line); method = req.get("method"); rid = req.get("id")
+    if method == "initialize":
+        print(json.dumps({"jsonrpc":"2.0","id":rid,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"mock","version":"1"}}}), flush=True)
+    elif method == "tools/list":
+        print(json.dumps({"jsonrpc":"2.0","id":rid,"result":{"tools":[{"name":"test_tool","description":"Test tool","input_schema":{}}]}}), flush=True)
+    elif method == "tools/call":
+        print(json.dumps({"jsonrpc":"2.0","id":rid,"result":{"content":[{"type":"text","text":"Called test_tool"}]}}), flush=True)
+"#;
+    let dir = std::env::temp_dir().join(format!("mcp-mgr-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let script_path = dir.join("mock.py");
+    std::fs::write(&script_path, script).unwrap();
+    let mut config = McpConfig::default();
+    config.mcp_servers.insert(
+        "mock".into(),
+        McpServerConfig {
+            command: "python".into(),
+            args: vec![script_path.to_str().unwrap().into()],
+            env: HashMap::new(),
+        },
+    );
+    let mut manager = McpManager::new();
+    let results = manager.connect_all(&config).await;
+    assert!(results[0].1.is_ok());
+    let specs = manager.dynamic_tool_specs();
+    assert_eq!(specs[0].name, "mcp:mock:test_tool");
+    assert_eq!(
+        manager
+            .call_tool("mcp:mock:test_tool", serde_json::json!({}))
+            .await
+            .unwrap(),
+        "Called test_tool"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
