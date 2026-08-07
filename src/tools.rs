@@ -16,6 +16,8 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use tokio_util::sync::CancellationToken;
+
 /// Soft caps for search tools so a single call cannot flood the transcript.
 const GLOB_RESULT_CAP: usize = 200;
 const GREP_MATCH_CAP: usize = 200;
@@ -23,9 +25,6 @@ const GREP_MATCH_CAP: usize = 200;
 const GREP_MAX_FILE_BYTES: u64 = 1_048_576;
 
 /// Default `run_shell` wall-clock timeout when `LUMINUS_SHELL_TIMEOUT_SECS` is unset.
-///
-/// Full async cancellation via [`tokio_util::sync::CancellationToken`] is Phase 12D;
-/// this slice only implements timeout-based process kill (cancellable-run foundation).
 pub const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 30;
 
 /// Poll interval while waiting for a shell child to exit.
@@ -121,6 +120,8 @@ pub enum ToolError {
     EditFailed(String),
     /// Shell (or other bounded) tool exceeded its wall-clock timeout and was killed.
     Timeout(String),
+    /// Shell (or other bounded) tool was cancelled via [`CancellationToken`].
+    Cancelled(String),
 }
 
 impl std::fmt::Display for ToolError {
@@ -139,6 +140,7 @@ impl std::fmt::Display for ToolError {
             }
             Self::EditFailed(reason) => write!(f, "edit failed: {reason}"),
             Self::Timeout(reason) => write!(f, "timeout: {reason}"),
+            Self::Cancelled(reason) => write!(f, "cancelled: {reason}"),
         }
     }
 }
@@ -226,7 +228,24 @@ impl ToolRegistry {
         Ok(ApprovalRequest { request, spec })
     }
 
+    /// Execute an approved tool without a cancellation token (sync path).
+    ///
+    /// For `run_shell` this applies the default wall-clock timeout only.
     pub fn execute(&self, approval: &ApprovalRequest) -> Result<ToolOutput, ToolError> {
+        self.execute_with_cancel(approval, None)
+    }
+
+    /// Execute an approved tool, optionally honouring a [`CancellationToken`].
+    ///
+    /// Only `run_shell` special-cases cancel today: when `cancel` is `Some` and
+    /// the token is cancelled during the poll loop, the child is killed and
+    /// [`ToolError::Cancelled`] is returned. All other tools ignore `cancel`
+    /// and fall through to the normal synchronous path.
+    pub fn execute_with_cancel(
+        &self,
+        approval: &ApprovalRequest,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<ToolOutput, ToolError> {
         let args = &approval.request.args;
         let metadata = approval.metadata()?;
         if metadata.decision == PermissionDecision::Deny {
@@ -257,7 +276,7 @@ impl ToolRegistry {
                 grep_files(pattern, &search_root, &metadata.cwd)?
             }
             "edit_file" => edit_file(&metadata.affected_paths[0], &args[1], &args[2])?,
-            "run_shell" => run_shell(&args[0])?,
+            "run_shell" => run_shell_cancellable(&args[0], cancel)?,
             "http_get" => return Err(ToolError::NetworkDisabled),
             _ => return Err(ToolError::UnknownTool(approval.request.name.clone())),
         };
@@ -843,24 +862,54 @@ pub fn shell_timeout() -> Duration {
     }
 }
 
-/// Run one shell command with the configured default timeout ([`shell_timeout`]).
+/// Run one shell command with the configured default timeout ([`shell_timeout`])
+/// and an optional [`CancellationToken`].
 ///
 /// On timeout the child process is killed (`Child::kill`) and
-/// [`ToolError::Timeout`] is returned. Full async cancel via CancellationToken
-/// is deferred to Phase 12D — this is the timeout-kill foundation only.
-fn run_shell(command: &str) -> Result<String, ToolError> {
-    run_shell_with_timeout(command, shell_timeout())
+/// [`ToolError::Timeout`] is returned. When a cancel token is provided and
+/// fires during the poll loop, the child is killed and
+/// [`ToolError::Cancelled`] is returned.
+fn run_shell_cancellable(
+    command: &str,
+    cancel: Option<&CancellationToken>,
+) -> Result<String, ToolError> {
+    run_shell_with_timeout_cancellable(command, shell_timeout(), cancel)
 }
 
 /// Run one shell command, killing the child if it exceeds `timeout`.
 ///
-/// Std-only: spawn with piped stdio, drain stdout/stderr on helper threads,
-/// poll `try_wait` until exit or deadline. On Windows, `kill()` on the direct
-/// child is sufficient (process-group kill is harder and not required here).
+/// Wrapper around [`run_shell_with_timeout_cancellable`] with no cancel token,
+/// kept for API stability and existing callers/tests.
 ///
 /// Destructive denylist / security checks remain in [`ToolRegistry::prepare`]
 /// and are not re-checked here — callers must only invoke this after approval.
 pub fn run_shell_with_timeout(command: &str, timeout: Duration) -> Result<String, ToolError> {
+    run_shell_with_timeout_cancellable(command, timeout, None)
+}
+
+/// Run one shell command, killing the child on timeout **or** cancel.
+///
+/// Std-only: spawn with piped stdio, drain stdout/stderr on helper threads,
+/// poll `try_wait` every [`SHELL_WAIT_POLL`] until exit, deadline, or cancel.
+/// When `cancel` is `Some` and `is_cancelled()` during the poll loop, the
+/// child is killed and [`ToolError::Cancelled`] is returned. On timeout,
+/// [`ToolError::Timeout`] is returned instead.
+///
+/// On Windows, `kill()` on the direct child is sufficient (process-group kill
+/// is harder and not required here).
+pub fn run_shell_with_timeout_cancellable(
+    command: &str,
+    timeout: Duration,
+    cancel: Option<&CancellationToken>,
+) -> Result<String, ToolError> {
+    // Honour a pre-cancelled token before spawning so callers can short-circuit
+    // without leaking a child process.
+    if cancel.is_some_and(|c| c.is_cancelled()) {
+        return Err(ToolError::Cancelled(
+            "shell command cancelled before start".into(),
+        ));
+    }
+
     #[cfg(windows)]
     let mut child = Command::new("cmd")
         .args(["/C", command])
@@ -922,13 +971,20 @@ pub fn run_shell_with_timeout(command: &str, timeout: Duration) -> Result<String
                 }));
             }
             Ok(None) => {
-                if Instant::now() >= deadline {
+                if cancel.is_some_and(|c| c.is_cancelled()) {
                     // Best-effort kill of the direct child. On Windows this is
                     // enough for typical cmd /C trees; process-group kill is
                     // out of scope for this slice.
                     let _ = child.kill();
                     let _ = child.wait();
                     // Drain readers so helper threads do not block forever.
+                    let _ = rx_out.recv_timeout(Duration::from_millis(200));
+                    let _ = rx_err.recv_timeout(Duration::from_millis(200));
+                    return Err(ToolError::Cancelled("shell command cancelled".into()));
+                }
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
                     let _ = rx_out.recv_timeout(Duration::from_millis(200));
                     let _ = rx_err.recv_timeout(Duration::from_millis(200));
                     return Err(ToolError::Timeout(format!(

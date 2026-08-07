@@ -4,6 +4,7 @@ pub mod command;
 pub mod context;
 pub mod event;
 pub mod model;
+pub mod permission_policy;
 pub mod providers;
 pub mod session;
 pub mod tool_activity;

@@ -18,10 +18,12 @@ use luminus::{
     providers::openai_runtime::{OpenAiProvider, RuntimeProvider},
     session::{Session, default_root},
     tool_event::ToolCallId,
-    tools::{ApprovalRequest, ToolRegistry, ToolRequest},
+    tools::{ApprovalRequest, ToolError, ToolOutput, ToolRegistry, ToolRequest},
     tui::{self, Theme},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
+use std::sync::mpsc as std_mpsc;
+use std::thread;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -59,9 +61,13 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
     let mut app = App::default();
+    // Project-persisted tool allow/deny from `<cwd>/.luminus/tool_policy.json`.
+    // Failures are non-fatal (message on `last_policy_error`).
+    let _ = app.load_project_policy_from_cwd();
     let mut composer = String::new();
     let mut cancel: Option<CancellationToken> = None;
     let mut agent_cancel: Option<CancellationToken> = None;
+    let mut pending_tool: Option<PendingToolExec> = None;
     let (provider_tx, mut provider_rx) = mpsc::unbounded_channel::<ProviderEvent>();
     let mut provider = RuntimeProvider::from_env_or_fake(Duration::from_millis(80));
     let mut model_catalog = ModelCatalog::new();
@@ -95,6 +101,31 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        // Non-blocking poll for background tool completion (cancellable shell).
+        if let Some(pending) = pending_tool.as_ref() {
+            match pending.rx.try_recv() {
+                Ok(result) => {
+                    let finished = pending_tool.take().expect("pending tool just completed");
+                    if cancel.as_ref().is_some_and(|t| t == &finished.cancel) {
+                        cancel = None;
+                    }
+                    finish_tool_execution(&mut app, finished, result);
+                }
+                Err(std_mpsc::TryRecvError::Empty) => {}
+                Err(std_mpsc::TryRecvError::Disconnected) => {
+                    let finished = pending_tool.take().expect("pending tool worker died");
+                    if cancel.as_ref().is_some_and(|t| t == &finished.cancel) {
+                        cancel = None;
+                    }
+                    finish_tool_execution(
+                        &mut app,
+                        finished,
+                        Err(ToolError::Process("tool worker disconnected".into())),
+                    );
+                }
+            }
+        }
+
         if event::poll(Duration::from_millis(40))? {
             let ev = event::read()?;
 
@@ -102,8 +133,10 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
             // Keys (Intruksi / Hermes-style):
             //   Y / Enter — allow once
             //   A         — allow for session
+            //   P         — allow + persist project
             //   N / Esc   — reject once
             //   D         — reject + deny for session
+            //   X         — reject + persist project deny
             if app.ui_mode() == luminus::app::UiMode::Approval {
                 if let Event::Key(KeyEvent {
                     code,
@@ -118,16 +151,28 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('a') | KeyCode::Char('A') => {
                             Some(ApprovalChoice::AllowSession)
                         }
+                        KeyCode::Char('p') | KeyCode::Char('P') => {
+                            Some(ApprovalChoice::AllowProject)
+                        }
                         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                             Some(ApprovalChoice::Reject)
                         }
                         KeyCode::Char('d') | KeyCode::Char('D') => {
                             Some(ApprovalChoice::RejectDenySession)
                         }
+                        KeyCode::Char('x') | KeyCode::Char('X') => {
+                            Some(ApprovalChoice::RejectDenyProject)
+                        }
                         _ => None,
                     };
                     if let Some(choice) = choice {
-                        handle_approval_choice(&mut app, &tool_registry, choice);
+                        handle_approval_choice(
+                            &mut app,
+                            &tool_registry,
+                            choice,
+                            &mut cancel,
+                            &mut pending_tool,
+                        );
                     }
                 }
                 continue;
@@ -178,7 +223,9 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                     kind: event::KeyEventKind::Press,
                     ..
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
-                    if let Some(token) = &cancel {
+                    if let Some(token) = &agent_cancel {
+                        token.cancel();
+                    } else if let Some(token) = &cancel {
                         token.cancel();
                     } else {
                         should_exit = true;
@@ -362,7 +409,13 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
                                 let request = ToolRequest { name, args };
                                 match tool_registry.prepare(request) {
                                     Ok(approval) => {
-                                        apply_prepared_approval(&mut app, &tool_registry, approval);
+                                        apply_prepared_approval(
+                                            &mut app,
+                                            &tool_registry,
+                                            approval,
+                                            &mut cancel,
+                                            &mut pending_tool,
+                                        );
                                     }
                                     Err(error) => {
                                         app.start_request(
@@ -488,16 +541,68 @@ async fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Execute an approved tool through the shared lifecycle path used by both
-/// interactive choices and session auto-allow.
-fn execute_approved_tool(app: &mut App, tool_registry: &ToolRegistry, approval: ApprovalRequest) {
+/// Background tool execution so the TUI can keep polling Esc/Ctrl+C cancel tokens.
+struct PendingToolExec {
+    id: ToolCallId,
+    approval: ApprovalRequest,
+    started: Instant,
+    cancel: CancellationToken,
+    rx: std_mpsc::Receiver<Result<ToolOutput, ToolError>>,
+}
+
+/// Start an approved tool on a worker thread with a cancellable token.
+///
+/// Shell commands honour the token via `execute_with_cancel`; other tools ignore it.
+/// The event loop keeps drawing and can cancel with Esc / Ctrl+C.
+fn start_approved_tool(
+    app: &mut App,
+    tool_registry: &ToolRegistry,
+    approval: ApprovalRequest,
+    cancel_slot: &mut Option<CancellationToken>,
+    pending_tool: &mut Option<PendingToolExec>,
+) {
+    if pending_tool.is_some() {
+        app.start_command(
+            "command",
+            "tool error: another tool is already running (Esc/Ctrl+C to cancel)",
+        );
+        app.apply_provider_event(ProviderEvent::Completed {
+            request_id: "command".into(),
+        });
+        return;
+    }
+
     let id = ToolCallId::new();
     app.begin_tool(id, approval.request.name.clone());
     let started = Instant::now();
-    let result = tool_registry.execute(&approval);
-    let duration = started.elapsed();
-    let message = app.record_tool_result(id, &approval, result, duration);
-    // Preserve tool activity cards (start_request would clear them).
+    let token = CancellationToken::new();
+    *cancel_slot = Some(token.clone());
+
+    let (tx, rx) = std_mpsc::channel();
+    let registry = *tool_registry;
+    let approval_for_worker = approval.clone();
+    let worker_token = token.clone();
+    thread::spawn(move || {
+        let result = registry.execute_with_cancel(&approval_for_worker, Some(&worker_token));
+        let _ = tx.send(result);
+    });
+
+    *pending_tool = Some(PendingToolExec {
+        id,
+        approval,
+        started,
+        cancel: token,
+        rx,
+    });
+}
+
+fn finish_tool_execution(
+    app: &mut App,
+    pending: PendingToolExec,
+    result: Result<ToolOutput, ToolError>,
+) {
+    let duration = pending.started.elapsed();
+    let message = app.record_tool_result(pending.id, &pending.approval, result, duration);
     app.start_command("command", message);
     app.apply_provider_event(ProviderEvent::Completed {
         request_id: "command".into(),
@@ -514,33 +619,67 @@ fn reject_tool(app: &mut App, tool_name: impl Into<String>) {
 }
 
 /// Apply an operator choice from the approval overlay.
-fn handle_approval_choice(app: &mut App, tool_registry: &ToolRegistry, choice: ApprovalChoice) {
+fn handle_approval_choice(
+    app: &mut App,
+    tool_registry: &ToolRegistry,
+    choice: ApprovalChoice,
+    cancel_slot: &mut Option<CancellationToken>,
+    pending_tool: &mut Option<PendingToolExec>,
+) {
     match choice {
-        ApprovalChoice::AllowOnce | ApprovalChoice::AllowSession => {
+        ApprovalChoice::AllowOnce | ApprovalChoice::AllowSession | ApprovalChoice::AllowProject => {
             if let Some(approval) = app.resolve_approval(choice) {
-                execute_approved_tool(app, tool_registry, approval);
+                start_approved_tool(app, tool_registry, approval, cancel_slot, pending_tool);
+            }
+            if let Some(error) = app.last_policy_error.take() {
+                // Surface project-policy save failures without aborting the tool run.
+                app.start_command("command", format!("policy: {error}"));
+                app.apply_provider_event(ProviderEvent::Completed {
+                    request_id: "command".into(),
+                });
             }
         }
-        ApprovalChoice::Reject | ApprovalChoice::RejectDenySession => {
+        ApprovalChoice::Reject
+        | ApprovalChoice::RejectDenySession
+        | ApprovalChoice::RejectDenyProject => {
             let tool_name = app
                 .resolve_approval(choice)
                 .map(|a| a.request.name)
                 .unwrap_or_else(|| "tool".into());
             reject_tool(app, tool_name);
+            if let Some(error) = app.last_policy_error.take() {
+                app.start_command("command", format!("policy: {error}"));
+                app.apply_provider_event(ProviderEvent::Completed {
+                    request_id: "command".into(),
+                });
+            }
         }
     }
 }
 
-/// Route a prepared approval through session policy, then execute / deny / prompt.
-fn apply_prepared_approval(app: &mut App, tool_registry: &ToolRegistry, approval: ApprovalRequest) {
+/// Route a prepared approval through session/project policy, then execute / deny / prompt.
+fn apply_prepared_approval(
+    app: &mut App,
+    tool_registry: &ToolRegistry,
+    approval: ApprovalRequest,
+    cancel_slot: &mut Option<CancellationToken>,
+    pending_tool: &mut Option<PendingToolExec>,
+) {
     match app.gate_approval(approval) {
-        ApprovalGate::SessionAllowed(approval) => {
-            execute_approved_tool(app, tool_registry, approval);
+        ApprovalGate::SessionAllowed(approval) | ApprovalGate::ProjectAllowed(approval) => {
+            start_approved_tool(app, tool_registry, approval, cancel_slot, pending_tool);
         }
         ApprovalGate::SessionDenied { tool } => {
             // Emit cancelled lifecycle card, then a clear session-deny transcript line.
             let _ = app.record_tool_rejection(tool.clone());
             app.start_command("command", format!("tool {tool}: denied for this session"));
+            app.apply_provider_event(ProviderEvent::Completed {
+                request_id: "command".into(),
+            });
+        }
+        ApprovalGate::ProjectDenied { tool } => {
+            let _ = app.record_tool_rejection(tool.clone());
+            app.start_command("command", format!("tool {tool}: denied by project policy"));
             app.apply_provider_event(ProviderEvent::Completed {
                 request_id: "command".into(),
             });

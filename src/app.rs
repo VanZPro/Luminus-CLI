@@ -1,6 +1,7 @@
 use crate::agent::{AgentRun, AgentStatus};
 use crate::context::ContextBudget;
 use crate::event::ProviderEvent;
+use crate::permission_policy::{ProjectToolPolicy, ToolPolicy};
 use crate::session::{SavedMessage, Session};
 use crate::tool_activity::ToolActivity;
 use crate::tool_event::{ToolCallId, ToolLifecycleEvent};
@@ -8,6 +9,7 @@ use crate::tool_output::{BoundedOutput, Bounds, TruncationKind};
 use crate::tools::{ApprovalRequest, ToolError, ToolOutput};
 use std::collections::HashMap;
 use std::fmt;
+use std::path::Path;
 use std::time::Duration;
 
 /// Operator choice on a pending tool-approval overlay (Intruksi / Hermes-style).
@@ -17,10 +19,14 @@ pub enum ApprovalChoice {
     AllowOnce,
     /// Approve this invocation and auto-allow matching tool for the rest of the process.
     AllowSession,
+    /// Approve this invocation and persist allow for the tool in the project policy file.
+    AllowProject,
     /// Reject this invocation only.
     Reject,
     /// Reject this invocation and auto-deny matching tool for the rest of the process.
     RejectDenySession,
+    /// Reject this invocation and persist deny for the tool in the project policy file.
+    RejectDenyProject,
 }
 
 /// Session-scoped policy for a tool name (process lifetime, cleared on [`App::clear`]).
@@ -30,14 +36,18 @@ pub enum SessionToolPolicy {
     Denied,
 }
 
-/// Result of routing a prepared approval through session allow/deny lists.
+/// Result of routing a prepared approval through session + project allow/deny lists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalGate {
     /// Tool is on the session allowlist — execute without showing the overlay.
     SessionAllowed(ApprovalRequest),
     /// Tool is on the session denylist — skip overlay and surface a denial.
     SessionDenied { tool: String },
-    /// No session policy matched; the approval overlay is now active.
+    /// Tool is on the project allowlist — execute without showing the overlay.
+    ProjectAllowed(ApprovalRequest),
+    /// Tool is on the project denylist — skip overlay and surface a denial.
+    ProjectDenied { tool: String },
+    /// No session or project policy matched; the approval overlay is now active.
     NeedsPrompt,
 }
 
@@ -122,6 +132,12 @@ pub struct App {
     pub pending_approval: Option<ApprovalRequest>,
     /// Session-scoped allow/deny policy keyed by tool name (process lifetime).
     session_tool_policy: HashMap<String, SessionToolPolicy>,
+    /// Project-persisted allow/deny policy (`.luminus/tool_policy.json`).
+    ///
+    /// Loaded at startup via [`Self::load_project_policy`]. Survives [`Self::clear`].
+    project_tool_policy: Option<ProjectToolPolicy>,
+    /// Last non-fatal error from a project-policy disk write (surface to the UI).
+    pub last_policy_error: Option<String>,
 }
 
 impl App {
@@ -130,28 +146,94 @@ impl App {
         self.session_tool_policy.get(tool).copied()
     }
 
-    /// Route a prepared approval through session allow/deny lists.
+    /// Current project policy for `tool`, if a project store is loaded and has an entry.
+    pub fn project_policy(&self, tool: &str) -> Option<ToolPolicy> {
+        self.project_tool_policy.as_ref()?.get(tool)
+    }
+
+    /// Borrow the loaded project policy store, if any.
+    pub fn project_tool_policy(&self) -> Option<&ProjectToolPolicy> {
+        self.project_tool_policy.as_ref()
+    }
+
+    /// Load (or replace) project tool policy from `project_root/.luminus/tool_policy.json`.
     ///
-    /// Denylist is checked first (auto-deny, no overlay). Allowlist auto-takes
-    /// without overlay. Otherwise the approval overlay is shown.
-    pub fn gate_approval(&mut self, request: ApprovalRequest) -> ApprovalGate {
-        let tool = request.request.name.as_str();
-        match self.session_policy(tool) {
-            Some(SessionToolPolicy::Denied) => ApprovalGate::SessionDenied {
-                tool: tool.to_owned(),
-            },
-            Some(SessionToolPolicy::Allowed) => ApprovalGate::SessionAllowed(request),
-            None => {
-                self.show_approval(request);
-                ApprovalGate::NeedsPrompt
+    /// Missing file is fine (empty in-memory store bound to that root). I/O
+    /// failures return `Err` and leave any previous store untouched.
+    pub fn load_project_policy(
+        &mut self,
+        project_root: impl AsRef<Path>,
+    ) -> std::io::Result<&ProjectToolPolicy> {
+        let policy = ProjectToolPolicy::load(project_root)?;
+        self.project_tool_policy = Some(policy);
+        Ok(self
+            .project_tool_policy
+            .as_ref()
+            .expect("just inserted project policy"))
+    }
+
+    /// Load project policy from the process current working directory.
+    ///
+    /// On failure, records a message in [`Self::last_policy_error`] and returns
+    /// `false` without panicking.
+    pub fn load_project_policy_from_cwd(&mut self) -> bool {
+        let root = match std::env::current_dir() {
+            Ok(root) => root,
+            Err(error) => {
+                self.last_policy_error =
+                    Some(format!("could not resolve project directory: {error}"));
+                return false;
+            }
+        };
+        match self.load_project_policy(&root) {
+            Ok(_) => {
+                self.last_policy_error = None;
+                true
+            }
+            Err(error) => {
+                self.last_policy_error = Some(format!(
+                    "could not load project tool policy from {}: {error}",
+                    root.display()
+                ));
+                false
             }
         }
     }
 
+    /// Route a prepared approval through session **and** project allow/deny lists.
+    ///
+    /// Precedence (first match wins):
+    /// 1. session deny
+    /// 2. project deny
+    /// 3. session allow
+    /// 4. project allow
+    /// 5. prompt (overlay)
+    pub fn gate_approval(&mut self, request: ApprovalRequest) -> ApprovalGate {
+        let tool = request.request.name.as_str();
+        if self.session_policy(tool) == Some(SessionToolPolicy::Denied) {
+            return ApprovalGate::SessionDenied {
+                tool: tool.to_owned(),
+            };
+        }
+        if self.project_policy(tool) == Some(ToolPolicy::Denied) {
+            return ApprovalGate::ProjectDenied {
+                tool: tool.to_owned(),
+            };
+        }
+        if self.session_policy(tool) == Some(SessionToolPolicy::Allowed) {
+            return ApprovalGate::SessionAllowed(request);
+        }
+        if self.project_policy(tool) == Some(ToolPolicy::Allowed) {
+            return ApprovalGate::ProjectAllowed(request);
+        }
+        self.show_approval(request);
+        ApprovalGate::NeedsPrompt
+    }
+
     /// Show the approval overlay for a tool invocation.
     ///
-    /// Prefer [`Self::gate_approval`] at call sites so session allow/deny lists
-    /// are honoured; this method forces the overlay regardless of policy.
+    /// Prefer [`Self::gate_approval`] at call sites so session/project allow/deny
+    /// lists are honoured; this method forces the overlay regardless of policy.
     pub fn show_approval(&mut self, request: ApprovalRequest) {
         self.pending_approval = Some(request);
         self.ui_mode = UiMode::Approval;
@@ -160,7 +242,9 @@ impl App {
     /// Apply an operator choice to the pending approval and clear the overlay.
     ///
     /// Session choices update the process-local allow/deny map (keyed by tool
-    /// name). Once-only choices leave the map unchanged.
+    /// name). Project choices update the in-memory project store **and** attempt
+    /// an atomic disk save; save failures set [`Self::last_policy_error`] and do
+    /// not panic. Once-only choices leave both maps unchanged.
     pub fn resolve_approval(&mut self, choice: ApprovalChoice) -> Option<ApprovalRequest> {
         self.ui_mode = UiMode::Normal;
         let approval = self.pending_approval.take()?;
@@ -175,8 +259,35 @@ impl App {
                 self.session_tool_policy
                     .insert(tool, SessionToolPolicy::Denied);
             }
+            ApprovalChoice::AllowProject => {
+                self.persist_project_policy(&tool, ToolPolicy::Allowed);
+            }
+            ApprovalChoice::RejectDenyProject => {
+                self.persist_project_policy(&tool, ToolPolicy::Denied);
+            }
         }
         Some(approval)
+    }
+
+    /// Update in-memory project policy and save to disk. Failures are recorded
+    /// in [`Self::last_policy_error`] rather than panicking.
+    fn persist_project_policy(&mut self, tool: &str, policy: ToolPolicy) {
+        if self.project_tool_policy.is_none() {
+            // Ensure we have a store bound to cwd so P/X still work mid-session.
+            let root = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+            self.project_tool_policy = Some(ProjectToolPolicy::empty(root));
+        }
+        if let Some(store) = self.project_tool_policy.as_mut() {
+            store.set(tool, policy);
+            match store.save() {
+                Ok(_) => self.last_policy_error = None,
+                Err(error) => {
+                    self.last_policy_error = Some(format!(
+                        "failed to save project tool policy for `{tool}`: {error}"
+                    ));
+                }
+            }
+        }
     }
 
     /// Accept the pending tool approval once and clear the overlay.
@@ -504,7 +615,10 @@ impl App {
 
     /// Removes all conversation history, in-flight request tracking, and any
     /// transient UI/approval state so a stale approval overlay cannot survive
-    /// a reset. Also clears session-scoped tool allow/deny lists.
+    /// a reset. Also clears **session-scoped** tool allow/deny lists.
+    ///
+    /// Project-persisted rules (`.luminus/tool_policy.json` and the in-memory
+    /// [`ProjectToolPolicy`] store) are **not** cleared — they outlive `/clear`.
     pub fn clear(&mut self) {
         self.messages.clear();
         self.tool_activities.clear();
@@ -513,6 +627,7 @@ impl App {
         self.pending_approval = None;
         self.ui_mode = UiMode::Normal;
         self.session_tool_policy.clear();
+        self.last_policy_error = None;
     }
 }
 

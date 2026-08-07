@@ -12,8 +12,10 @@ Terminal-native AI coding agent written in Rust. Ratatui TUI, streaming chat, pr
 - **`/discover`** — list models from the active provider’s `GET /models`
 - **Models** — role map (`default` / `fast` / `deep`), `/model`, `/models`, `Ctrl+M` selector
 - **Sessions** — JSON under the platform data dir; `/save`, `/sessions`, `/load` (atomic write, sanitized names)
-- **Tools** — `/tools`, `/tool <name> …` with approval overlay (`y`/`n`); specs: `read_file`, `write_file`, `list_dir`, `run_shell`, `http_get`
-- **Security basics** — explicit approval; path canonicalization + project-root check for relative paths; sensitive-path deny (`.env`, keys, `.ssh`/`.aws`, …); shell denylist for a few destructive patterns; API keys redacted in debug paths
+- **Tools** — `/tools`, `/tool <name> …` with approval overlay; specs: `read_file`, `write_file`, `list_dir`, `run_shell`, `file_meta`/`file_metadata`, `glob`, `grep`, `edit_file`, `http_get` (disabled)
+- **Approval choices** — `Y`/Enter once, `A` session allow, `P` project allow (persist), `N`/Esc reject, `D` session deny, `X` project deny (persist)
+- **Security basics** — explicit approval; path canonicalization + project-root check for relative paths; sensitive-path deny (`.env`, keys, `.ssh`/`.aws`, …); shell denylist for a few destructive patterns; project policy file `.luminus/tool_policy.json`; API keys redacted in debug paths
+- **Shell** — timeout (default 30s, `LUMINUS_SHELL_TIMEOUT_SECS`); background worker + `Esc`/`Ctrl+C` cancel via `CancellationToken`
 - **Agents** — `/spawn <prompt>` one isolated child request; single-child policy; `Esc` / `Ctrl+C` cancellation; context-window estimate
 
 ## Limitations (honest)
@@ -22,7 +24,8 @@ Terminal-native AI coding agent written in Rust. Ratatui TUI, streaming chat, pr
 - **`run_shell` is not sandboxed** — denylist is defense-in-depth only; approved commands run on the host shell
 - **Absolute paths** can target outside the project after approval (relative paths are contained)
 - **No full MCP / skills runtime / LSP / plugins** in the binary yet (a `skills/` tree may exist in the repo as reference material; the agent does not load it as a product feature)
-- **One child agent at a time**; tools run **synchronously** when approved
+- **One child agent / one tool** at a time; no full multi-tool parallel orchestration yet
+- **No disk artifact store** for truncated tool output (full text kept in-memory only)
 - **Model catalog** is in-memory / role-based
 - **No claim** of full Intruksi / production acceptance criteria
 
@@ -74,6 +77,7 @@ Secrets are never committed. Use placeholders only:
 | `OPENAI_BASE_URL` or `LUMINUS_OPENAI_BASE_URL` | Base URL (default `https://api.openai.com/v1`) |
 | `OPENAI_MODEL` or `LUMINUS_OPENAI_MODEL` | Model id (default `gpt-4o-mini`) |
 | `LUMINUS_DATA_DIR` | Override session root |
+| `LUMINUS_SHELL_TIMEOUT_SECS` | Shell timeout in seconds (default `30`) |
 | `NO_COLOR` | Monochrome TUI if set |
 
 ```bash

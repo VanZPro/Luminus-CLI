@@ -79,14 +79,14 @@ fn render_approval_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, theme: 
     };
     let metadata = approval.metadata().ok();
     let width = area.width.saturating_sub(6).clamp(48, 92);
-    let base_height = 10;
+    let base_height = 11;
     let extra = metadata
         .as_ref()
         .map(|m| 1 + m.affected_paths.len().min(4) + if m.reason.is_empty() { 0 } else { 1 })
         .unwrap_or(0);
     let height = (base_height + extra as u16)
         .min(area.height.saturating_sub(2))
-        .max(6);
+        .max(8);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     let popup = Rect::new(x, y, width, height);
@@ -132,8 +132,9 @@ fn render_approval_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, theme: 
     }
     lines.push(Line::from(""));
     lines.push(Line::from(
-        "Y/Enter: allow once  ·  A: allow session  ·  N/Esc: reject  ·  D: deny session",
+        "Y/Enter: once  ·  A: session allow  ·  P: project allow  ·  N/Esc: reject",
     ));
+    lines.push(Line::from("D: session deny  ·  X: project deny"));
 
     frame.render_widget(
         Paragraph::new(lines)
